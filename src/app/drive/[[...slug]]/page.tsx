@@ -16,12 +16,15 @@ import { v4 as uuidv4 } from 'uuid';
 import { useToast } from '@/contexts/ToastContext';
 import { useStorage } from '@/contexts/StorageContext';
 
+import { useAuth } from '@/contexts/AuthContext';
+
 export default function DrivePage() {
     const params = useParams();
     const router = useRouter();
     const slug = params.slug as string[] | undefined;
     const { showToast } = useToast();
     const { refreshStorage } = useStorage();
+    const { isAdmin, userEmail } = useAuth();
 
     // Project structure: /drive/[projectId]/[...folders]
     const slugKey = slug?.join('/') || '';
@@ -651,17 +654,19 @@ export default function DrivePage() {
                                     onClick={() => router.push(`/drive/${encodeURIComponent(project.name)}`)}
                                     className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm hover:shadow-md cursor-pointer transition-all hover:border-blue-300 group relative"
                                 >
-                                    {/* Delete Project Button */}
-                                    <button
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            handleDeleteProject(project);
-                                        }}
-                                        className="absolute top-4 right-4 p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg opacity-0 group-hover:opacity-100 transition-all z-10"
-                                        title="Delete Project"
-                                    >
-                                        <Trash2 className="w-5 h-5" />
-                                    </button>
+                                    {/* Delete Project Button - OPTIONAL: Only admin can delete */}
+                                    {isAdmin && (
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleDeleteProject(project);
+                                            }}
+                                            className="absolute top-4 right-4 p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg opacity-0 group-hover:opacity-100 transition-all z-10"
+                                            title="Delete Project"
+                                        >
+                                            <Trash2 className="w-5 h-5" />
+                                        </button>
+                                    )}
                                     <div className="flex justify-between items-start mb-4">
                                         <div className="p-3 bg-blue-50 text-blue-600 rounded-lg group-hover:bg-blue-600 group-hover:text-white transition-colors">
                                             <FolderPlus className="w-6 h-6" />
@@ -921,8 +926,19 @@ export default function DrivePage() {
                                                             </button>
                                                         )}
                                                         <button
-                                                            onClick={() => handleDelete(node)}
-                                                            className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Delete"
+                                                            onClick={(e) => {
+                                                                if (isAdmin || node.owner_email === userEmail) {
+                                                                    handleDelete(node);
+                                                                } else {
+                                                                    showToast("Access Denied: You can only delete your own files.", "error");
+                                                                }
+                                                            }}
+                                                            className={`p-2 rounded-lg transition-colors ${isAdmin || node.owner_email === userEmail
+                                                                ? 'text-slate-400 hover:text-red-600 hover:bg-red-50'
+                                                                : 'text-slate-200 cursor-not-allowed'
+                                                                }`}
+                                                            title={isAdmin || node.owner_email === userEmail ? "Delete" : "You cannot delete this item"}
+                                                            disabled={!isAdmin && node.owner_email !== userEmail}
                                                         >
                                                             <Trash2 className="w-4 h-4" />
                                                         </button>

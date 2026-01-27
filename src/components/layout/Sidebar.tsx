@@ -23,11 +23,7 @@ export function Sidebar() {
     const { isAdmin, userEmail, signOut } = useAuth();
 
     const navItems = [
-        { icon: Home, label: 'Home', path: '/' },
         { icon: FolderOpen, label: 'My Files', path: '/drive' },
-        { icon: Clock, label: 'Recent', path: '/recent' },
-        { icon: Star, label: 'Starred', path: '/starred' },
-        { icon: Trash2, label: 'Recycle bin', path: '/trash' },
         ...(isAdmin ? [{ icon: Settings, label: 'Whitelist', path: '/admin/whitelist' }] : [])
     ];
 

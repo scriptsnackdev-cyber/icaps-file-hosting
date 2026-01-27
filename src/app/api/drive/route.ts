@@ -277,6 +277,20 @@ export async function DELETE(request: NextRequest) {
             return NextResponse.json({ error: 'Node not found or permission denied' }, { status: 404 });
         }
 
+        // Check Permissions: Admin (via Whitelist) OR Owner
+        const { data: whitelistData } = await supabase
+            .from('whitelist')
+            .select('role')
+            .eq('email', user.email)
+            .single();
+
+        const isAdmin = whitelistData?.role === 'admin';
+        const isOwner = targetNode.created_by === user.id || targetNode.owner_email === user.email;
+
+        if (!isAdmin && !isOwner) {
+            return NextResponse.json({ error: 'Access Denied: You can only delete your own files.' }, { status: 403 });
+        }
+
         const targetProjectId = targetNode.project_id;
 
         if (targetNode.type === 'FILE') {
