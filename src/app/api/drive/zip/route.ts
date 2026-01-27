@@ -82,9 +82,11 @@ export async function GET(request: NextRequest) {
                     Key: file.key,
                 });
                 const s3Response = await r2.send(command);
-                const stream = s3Response.Body as NodeJS.ReadableStream;
+                const stream = s3Response.Body;
                 if (stream) {
-                    archive.append(stream, { name: file.name });
+                    // Cast to any to bypass type mismatch between Web and Node streams
+                    // In a Node.js environment, the SDK stream implements Node Readable
+                    archive.append(stream as any, { name: file.name });
                 }
             } catch (err) {
                 console.error(`Failed to download ${file.name}`, err);
