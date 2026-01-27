@@ -2,7 +2,12 @@
 
 import React, { useState, useRef, ChangeEvent } from 'react';
 import { Upload, FileUp, CheckCircle2, AlertTriangle, CloudUpload } from 'lucide-react';
-import { UploadStatus } from '@/types';
+interface UploadStatus {
+    isUploading: boolean;
+    progress: number;
+    fileName: string | null;
+    error: string | null;
+}
 
 interface UploadSectionProps {
     onUploadComplete: () => void;

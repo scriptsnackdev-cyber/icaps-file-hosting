@@ -2,13 +2,13 @@
 
 import React from 'react';
 import { FileText, Download, Trash2, Calendar, HardDrive, File as FileIcon, Folder, FolderOpen, ChevronRight } from 'lucide-react';
-import { R2Object } from '@/types';
+import { StorageNode } from '@/types';
 
 interface FileTableProps {
-    files: R2Object[];
+    files: StorageNode[];
     loading: boolean;
-    onDelete: (key: string) => void;
-    onDownload: (key: string) => void;
+    onDelete: (id: string) => void;
+    onDownload: (id: string) => void;
     currentPath: string;
     onNavigate: (path: string) => void;
 }
@@ -37,14 +37,14 @@ export const FileTable: React.FC<FileTableProps> = ({ files, loading, onDelete, 
     // Directory Logic
     const getDisplayItems = () => {
         const folders = new Set<string>();
-        const fileItems: R2Object[] = [];
+        const fileItems: StorageNode[] = [];
 
         files.forEach(file => {
+            const key = file.r2_key || '';
             // If file is not in current path, skip
-            if (!file.key.startsWith(currentPath)) return;
+            if (!key.startsWith(currentPath)) return;
 
-            // Extract relative path
-            const relativePath = file.key.slice(currentPath.length);
+            const relativePath = key.slice(currentPath.length);
 
             // If relative path is empty, it's exactly the current path (maybe a placeholder object?), skip or handle
             if (!relativePath) return;
@@ -62,7 +62,7 @@ export const FileTable: React.FC<FileTableProps> = ({ files, loading, onDelete, 
 
         return {
             folders: Array.from(folders).sort(),
-            files: fileItems.sort((a, b) => a.key.localeCompare(b.key))
+            files: fileItems.sort((a, b) => (a.r2_key || '').localeCompare(b.r2_key || ''))
         };
     };
 
@@ -131,40 +131,40 @@ export const FileTable: React.FC<FileTableProps> = ({ files, loading, onDelete, 
 
                             {/* Files */}
                             {currentFiles.map((file) => (
-                                <tr key={file.key} className="hover:bg-blue-50/50 transition-colors group duration-200">
+                                <tr key={file.id} className="hover:bg-blue-50/50 transition-colors group duration-200">
                                     <td className="px-6 py-4">
                                         <div className="flex items-center space-x-4">
                                             <div className="flex-shrink-0 w-10 h-10 bg-blue-100 text-blue-600 rounded-lg flex items-center justify-center">
                                                 <FileText className="w-5 h-5" />
                                             </div>
-                                            <span className="text-sm font-medium text-slate-900 truncate max-w-[150px] sm:max-w-xs group-hover:text-blue-700 transition-colors" title={file.key}>
-                                                {file.key.split('/').pop()}
+                                            <span className="text-sm font-medium text-slate-900 truncate max-w-[150px] sm:max-w-xs group-hover:text-blue-700 transition-colors" title={file.r2_key || file.name}>
+                                                {file.name}
                                             </span>
                                         </div>
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap">
                                         <div className="flex items-center text-sm text-slate-500 bg-slate-100 px-2.5 py-1 rounded-full w-fit">
                                             <HardDrive className="w-3.5 h-3.5 mr-1.5 opacity-60" />
-                                            {formatSize(file.size)}
+                                            {file.size ? formatSize(file.size) : '0 Bytes'}
                                         </div>
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap hidden sm:table-cell">
                                         <div className="flex items-center text-sm text-slate-500">
                                             <Calendar className="w-4 h-4 mr-2 opacity-50" />
-                                            {formatDate(file.uploaded)}
+                                            {formatDate(file.created_at)}
                                         </div>
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                                         <div className="flex justify-end space-x-2">
                                             <button
-                                                onClick={(e) => { e.stopPropagation(); onDownload(file.key); }}
+                                                onClick={(e) => { e.stopPropagation(); onDownload(file.id); }}
                                                 className="p-2 text-blue-600 hover:bg-blue-100/80 rounded-lg transition-all shadow-sm hover:shadow-md border border-transparent hover:border-blue-200"
                                                 title="Download"
                                             >
                                                 <Download className="w-4.5 h-4.5" />
                                             </button>
                                             <button
-                                                onClick={(e) => { e.stopPropagation(); onDelete(file.key); }}
+                                                onClick={(e) => { e.stopPropagation(); onDelete(file.id); }}
                                                 className="p-2 text-red-600 hover:bg-red-100/80 rounded-lg transition-all shadow-sm hover:shadow-md border border-transparent hover:border-red-200"
                                                 title="Delete"
                                             >
