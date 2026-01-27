@@ -59,7 +59,14 @@ export default function LoginPage() {
             if (error.code === 'PGRST116') { // Supabase code for no rows returned from .single()
                 setMessage({ type: 'error', text: 'Access Denied: Your email is not whitelisted - 001.' });
             } else {
-                setMessage({ type: 'error', text: error.message || 'Failed to sign in' });
+                let errorMessage = error.message || 'Failed to sign in';
+
+                // Friendly error for rate limits
+                if (errorMessage.includes('rate limit exceeded') || error.status === 429) {
+                    errorMessage = 'Too many login attempts. Please wait 60 seconds before trying again.';
+                }
+
+                setMessage({ type: 'error', text: errorMessage });
             }
         } finally {
             setIsLoading(false);
