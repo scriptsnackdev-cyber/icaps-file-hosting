@@ -20,7 +20,7 @@ export function Sidebar() {
     const router = useRouter();
     const pathname = usePathname();
     const { totalSize } = useStorage();
-    const { isAdmin } = useAuth();
+    const { isAdmin, userEmail, signOut } = useAuth();
 
     const navItems = [
         { icon: Home, label: 'Home', path: '/' },
@@ -83,10 +83,21 @@ export function Sidebar() {
             </nav>
 
             {/* Footer */}
-            <div className="p-4 border-t border-slate-100">
-                <button className="flex items-center gap-2 text-sm font-medium text-slate-500 hover:text-slate-800 transition-colors w-full p-2 rounded-lg hover:bg-slate-50">
-                    <Settings className="w-4 h-4" />
-                    <span>Settings</span>
+            <div className="p-4 border-t border-slate-100 space-y-2">
+                {userEmail && (
+                    <div className="px-2 py-1">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Logged in as</p>
+                        <p className="text-sm font-medium text-slate-700 truncate" title={userEmail}>
+                            {userEmail}
+                        </p>
+                    </div>
+                )}
+                <button
+                    onClick={signOut}
+                    className="flex items-center gap-3 px-3 py-2.5 w-full text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                >
+                    <LogOut className="w-5 h-5" />
+                    <span>Sign Out</span>
                 </button>
             </div>
         </div>

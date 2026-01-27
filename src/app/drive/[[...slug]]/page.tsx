@@ -29,27 +29,41 @@ export default function DrivePage() {
     const folderPath = React.useMemo(() => slug?.slice(1) || [], [slugKey]); // Use slugKey for stability
     const folderPathKey = folderPath.join('/');
 
-    const [projects, setProjects] = useState<Project[]>(() => {
-        if (typeof window !== 'undefined') {
-            const saved = localStorage.getItem('cache_projects');
-            return saved ? JSON.parse(saved) : [];
+    const [projects, setProjects] = useState<Project[]>([]);
+    const [currentProject, setCurrentProject] = useState<Project | null>(null);
+    const [nodes, setNodes] = useState<StorageNode[]>([]);
+
+    // Hydrate from localStorage
+    useEffect(() => {
+        const savedProjects = localStorage.getItem('cache_projects');
+        if (savedProjects) {
+            try {
+                setProjects(JSON.parse(savedProjects));
+            } catch (e) {
+                console.error('Failed to parse cached projects', e);
+            }
         }
-        return [];
-    });
-    const [currentProject, setCurrentProject] = useState<Project | null>(() => {
-        if (typeof window !== 'undefined') {
-            const saved = localStorage.getItem(`cache_project_${urlProjectId}`);
-            return saved ? JSON.parse(saved) : null;
+    }, []);
+
+    useEffect(() => {
+        const savedProject = localStorage.getItem(`cache_project_${urlProjectId}`);
+        if (savedProject) {
+            try {
+                setCurrentProject(JSON.parse(savedProject));
+            } catch (e) {
+                console.error('Failed to parse cached project', e);
+            }
         }
-        return null;
-    });
-    const [nodes, setNodes] = useState<StorageNode[]>(() => {
-        if (typeof window !== 'undefined') {
-            const saved = localStorage.getItem(`cache_nodes_${urlProjectId}_${folderPathKey}`);
-            return saved ? JSON.parse(saved) : [];
+
+        const savedNodes = localStorage.getItem(`cache_nodes_${urlProjectId}_${folderPathKey}`);
+        if (savedNodes) {
+            try {
+                setNodes(JSON.parse(savedNodes));
+            } catch (e) {
+                console.error('Failed to parse cached nodes', e);
+            }
         }
-        return [];
-    });
+    }, [urlProjectId, folderPathKey]);
     const [loading, setLoading] = useState(true);
     const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
     const [folderChain, setFolderChain] = useState<{ id: string, name: string }[]>([]);

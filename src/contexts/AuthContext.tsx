@@ -7,6 +7,7 @@ interface AuthContextType {
     isAdmin: boolean;
     userEmail: string | null;
     loading: boolean;
+    signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -52,8 +53,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         checkAuth();
     }, []);
 
+    const signOut = async () => {
+        const supabase = createClient();
+        await supabase.auth.signOut();
+        setIsAdmin(false);
+        setUserEmail(null);
+        localStorage.removeItem('auth_is_admin');
+        localStorage.removeItem('auth_user_email');
+        window.location.href = '/login';
+    };
+
     return (
-        <AuthContext.Provider value={{ isAdmin, userEmail, loading }}>
+        <AuthContext.Provider value={{ isAdmin, userEmail, loading, signOut }}>
             {children}
         </AuthContext.Provider>
     );

@@ -38,7 +38,8 @@ export async function updateSession(request: NextRequest) {
         !user &&
         !request.nextUrl.pathname.startsWith('/login') &&
         !request.nextUrl.pathname.startsWith('/auth') &&
-        !request.nextUrl.pathname.startsWith('/share') // Allow shared links
+        !request.nextUrl.pathname.startsWith('/share') && // Allow shared links
+        !request.nextUrl.pathname.startsWith('/api') // Allow API calls to handle their own auth (returns 401 instead of redirect)
     ) {
         const url = request.nextUrl.clone()
         url.pathname = '/login'
