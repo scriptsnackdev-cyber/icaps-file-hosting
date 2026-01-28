@@ -26,24 +26,33 @@ export async function POST(request: NextRequest) {
         // Permission: Project members or admins
         // In this context, we just check if notify_on_activity is on and user is not owner
         if (project.created_by !== user.id && project.settings?.notify_on_activity) {
-            // Find owner email
-            const { data: rootFolder } = await supabase
-                .from('storage_nodes')
-                .select('owner_email')
-                .eq('project_id', projectId)
-                .is('parent_id', null)
-                .limit(1)
-                .single();
+            // Fetch owner email using Admin Client (Service Role)
+            // We need this because we can't query other users' emails directly from client SDK usually
+            const { createClient: createAdminClient } = require('@supabase/supabase-js');
+            const supabaseAdmin = createAdminClient(
+                process.env.NEXT_PUBLIC_SUPABASE_URL!,
+                process.env.SUPABASE_SERVICE_ROLE_KEY!,
+                {
+                    auth: {
+                        autoRefreshToken: false,
+                        persistSession: false
+                    }
+                }
+            );
 
-            if (rootFolder?.owner_email) {
+            const { data: { user: ownerUser }, error: ownerError } = await supabaseAdmin.auth.admin.getUserById(project.created_by);
+
+            if (!ownerError && ownerUser?.email) {
                 await sendActivityNotification({
-                    to: rootFolder.owner_email,
+                    to: ownerUser.email,
                     projectName: project.name,
                     userName: user.email || 'Unknown User',
                     action: action as any,
                     fileName: fileName,
                     timestamp: new Date().toLocaleString()
                 });
+            } else {
+                console.error("Failed to fetch project owner email for notification:", ownerError);
             }
         }
 

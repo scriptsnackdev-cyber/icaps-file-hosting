@@ -113,6 +113,8 @@ export default function DrivePage() {
     // Project Settings State
     const [isProjectSettingsOpen, setIsProjectSettingsOpen] = useState(false);
     const [projectSettings, setProjectSettings] = useState<{ notify_on_activity: boolean, version_retention_limit?: number, read_only?: boolean }>({ notify_on_activity: false, version_retention_limit: 0, read_only: false });
+    const [projectMembers, setProjectMembers] = useState<string[]>([]);
+    const [settingsTab, setSettingsTab] = useState<'general' | 'members'>('general');
     const [isSavingSettings, setIsSavingSettings] = useState(false);
     const [itemToDelete, setItemToDelete] = useState<StorageNode | null>(null);
     const [isDeleting, setIsDeleting] = useState(false);
@@ -240,8 +242,9 @@ export default function DrivePage() {
             return;
         }
 
-        // Only fetch if something actually changed or we don't have nodes
-        if (!force && lastFetchedRef.current === currentFetchKey && nodes.length > 0 && !loading) {
+        // Only fetch if something actually changed.
+        // We removed nodes.length > 0 check to prevent infinite loops on empty folders.
+        if (!force && lastFetchedRef.current === currentFetchKey) {
             return;
         }
 
@@ -294,11 +297,30 @@ export default function DrivePage() {
                 setLoading(false);
             }
         }
-    }, [urlProjectId, folderPathKey, router, showToast, nodes.length, loading]);
+    }, [urlProjectId, folderPathKey, router, showToast]);
 
     useEffect(() => {
         fetchNodes();
     }, [urlProjectId, folderPathKey, fetchNodes]); // Fetch nodes whenever URL project or path changes
+
+    useEffect(() => {
+        if (isProjectSettingsOpen && currentProject) {
+            const proj = currentProject as any;
+            setProjectSettings({
+                notify_on_activity: proj.notify_on_activity ?? proj.settings?.notify_on_activity ?? false,
+                version_retention_limit: proj.version_retention_limit ?? proj.settings?.version_retention_limit ?? 0,
+                read_only: proj.read_only ?? proj.settings?.read_only ?? false
+            });
+            setSettingsTab('general');
+
+            // Fetch members
+            const fetchMembers = async () => {
+                const { data } = await supabase.from('project_members').select('user_email').eq('project_id', currentProject.id);
+                if (data) setProjectMembers(data.map(d => d.user_email));
+            }
+            fetchMembers();
+        }
+    }, [isProjectSettingsOpen, currentProject, supabase]);
 
     useEffect(() => {
         if (isCreatingFolder && newFolderInputRef.current) {
@@ -1730,67 +1752,157 @@ export default function DrivePage() {
                             </button>
                         </div>
 
+                        {/* Tabs */}
+                        <div className="flex border-b border-slate-100">
+                            <button
+                                onClick={() => setSettingsTab('general')}
+                                className={`flex-1 py-3 text-sm font-bold text-center transition-colors relative ${settingsTab === 'general' ? 'text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}
+                            >
+                                General
+                                {settingsTab === 'general' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600" />}
+                            </button>
+                            <button
+                                onClick={() => setSettingsTab('members')}
+                                className={`flex-1 py-3 text-sm font-bold text-center transition-colors relative ${settingsTab === 'members' ? 'text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}
+                            >
+                                Members
+                                {settingsTab === 'members' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600" />}
+                            </button>
+                        </div>
+
                         <div className="p-8">
-                            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-4">Advanced Notifications</h4>
+                            {settingsTab === 'general' ? (
+                                <>
+                                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-4">Advanced Notifications</h4>
 
-                            <div className="flex items-start justify-between gap-4 p-4 bg-blue-50/50 rounded-xl border border-blue-100 mb-8">
-                                <div className="flex-1">
-                                    <div className="flex items-center gap-2 mb-1">
-                                        <Cloud className="w-4 h-4 text-blue-600" />
-                                        <span className="font-bold text-slate-800 text-sm">Activity Email Notifications</span>
+                                    <div className="flex items-start justify-between gap-4 p-4 bg-blue-50/50 rounded-xl border border-blue-100 mb-8">
+                                        <div className="flex-1">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <Cloud className="w-4 h-4 text-blue-600" />
+                                                <span className="font-bold text-slate-800 text-sm">Activity Email Notifications</span>
+                                            </div>
+                                            <p className="text-xs text-slate-500 leading-relaxed">
+                                                Send email alerts to the Project Owner whenever members upload or delete files.
+                                            </p>
+                                        </div>
+                                        <button
+                                            onClick={() => setProjectSettings(prev => ({ ...prev, notify_on_activity: !prev.notify_on_activity }))}
+                                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${projectSettings.notify_on_activity ? 'bg-blue-600' : 'bg-slate-300'}`}
+                                        >
+                                            <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${projectSettings.notify_on_activity ? 'translate-x-6' : 'translate-x-1'}`} />
+                                        </button>
                                     </div>
-                                    <p className="text-xs text-slate-500 leading-relaxed">
-                                        Send email alerts to the Project Owner whenever members upload or delete files.
-                                    </p>
-                                </div>
-                                <button
-                                    onClick={() => setProjectSettings(prev => ({ ...prev, notify_on_activity: !prev.notify_on_activity }))}
-                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${projectSettings.notify_on_activity ? 'bg-blue-600' : 'bg-slate-300'}`}
-                                >
-                                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${projectSettings.notify_on_activity ? 'translate-x-6' : 'translate-x-1'}`} />
-                                </button>
-                            </div>
 
-                            <div className="mb-8 p-4 bg-slate-50 rounded-xl border border-slate-200">
-                                <label className="block text-sm font-bold text-slate-700 mb-1 flex items-center gap-2">
-                                    <History className="w-4 h-4 text-slate-400" />
-                                    Version Retention Limit
-                                </label>
-                                <p className="text-[11px] text-slate-500 mb-3 leading-tight">
-                                    Maximum number of versions to keep per file. Older versions will be purged from storage (still visible in history but not downloadable).
-                                </p>
-                                <div className="flex items-center gap-3">
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        placeholder="0 = Unlimited"
-                                        value={projectSettings.version_retention_limit || ''}
-                                        onChange={(e) => setProjectSettings(prev => ({ ...prev, version_retention_limit: parseInt(e.target.value) || 0 }))}
-                                        className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm font-semibold"
-                                    />
-                                    <span className="text-xs text-slate-400 font-medium whitespace-nowrap">Versions</span>
-                                </div>
-                            </div>
+                                    <div className="mb-8 p-4 bg-slate-50 rounded-xl border border-slate-200">
+                                        <label className="block text-sm font-bold text-slate-700 mb-1 flex items-center gap-2">
+                                            <History className="w-4 h-4 text-slate-400" />
+                                            Version Retention Limit
+                                        </label>
+                                        <p className="text-[11px] text-slate-500 mb-3 leading-tight">
+                                            Maximum number of versions to keep per file. Older versions will be purged from storage (still visible in history but not downloadable).
+                                        </p>
+                                        <div className="flex items-center gap-3">
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                placeholder="0 = Unlimited"
+                                                value={projectSettings.version_retention_limit || ''}
+                                                onChange={(e) => setProjectSettings(prev => ({ ...prev, version_retention_limit: parseInt(e.target.value) || 0 }))}
+                                                className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm font-semibold"
+                                            />
+                                            <span className="text-xs text-slate-400 font-medium whitespace-nowrap">Versions</span>
+                                        </div>
+                                    </div>
 
-                            <div className="mb-6 flex items-center justify-between p-4 bg-amber-50 rounded-xl border border-amber-100">
-                                <div>
-                                    <label className="text-sm font-bold text-amber-900 flex items-center gap-2">
-                                        <Lock className="w-4 h-4" />
-                                        Read-Only Mode
-                                    </label>
-                                    <p className="text-[11px] text-amber-700 leading-tight mt-1">
-                                        Prevent all users (except Admins) from uploading, deleting, or modifying files in this project.
-                                    </p>
-                                </div>
-                                <button
-                                    onClick={() => setProjectSettings(prev => ({ ...prev, read_only: !prev.read_only }))}
-                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${projectSettings.read_only ? 'bg-amber-600' : 'bg-slate-300'}`}
-                                >
-                                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${projectSettings.read_only ? 'translate-x-6' : 'translate-x-1'}`} />
-                                </button>
-                            </div>
+                                    <div className="mb-6 flex items-center justify-between p-4 bg-amber-50 rounded-xl border border-amber-100">
+                                        <div>
+                                            <label className="text-sm font-bold text-amber-900 flex items-center gap-2">
+                                                <Lock className="w-4 h-4" />
+                                                Read-Only Mode
+                                            </label>
+                                            <p className="text-[11px] text-amber-700 leading-tight mt-1">
+                                                Prevent all users (except Admins) from uploading, deleting, or modifying files in this project.
+                                            </p>
+                                        </div>
+                                        <button
+                                            onClick={() => setProjectSettings(prev => ({ ...prev, read_only: !prev.read_only }))}
+                                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${projectSettings.read_only ? 'bg-amber-600' : 'bg-slate-300'}`}
+                                        >
+                                            <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${projectSettings.read_only ? 'translate-x-6' : 'translate-x-1'}`} />
+                                        </button>
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="space-y-4">
+                                    <div className="flex gap-2 mb-4">
+                                        <select
+                                            className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm"
+                                            onChange={(e) => {
+                                                if (e.target.value) {
+                                                    if (!projectMembers.includes(e.target.value)) {
+                                                        setProjectMembers(prev => [...prev, e.target.value]);
+                                                    }
+                                                    e.target.value = ""; // Reset
+                                                }
+                                            }}
+                                            defaultValue=""
+                                        >
+                                            <option value="" disabled>Add member...</option>
+                                            {whitelist
+                                                .filter(email => !projectMembers.includes(email) && email !== currentProject.created_by)
+                                                .map(email => (
+                                                    <option key={email} value={email}>{email}</option>
+                                                ))}
+                                        </select>
+                                    </div>
 
-                            <div className="flex gap-3">
+                                    <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                                        {/* Owner always shown */}
+                                        <div className="flex items-center justify-between p-3 bg-blue-50/50 rounded-lg border border-blue-100">
+                                            <div className="flex items-center gap-2">
+                                                <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-xs font-bold text-blue-600">
+                                                    {currentProject.created_by?.substring(0, 2).toUpperCase()}
+                                                </div>
+                                                <div>
+                                                    <p className="text-sm font-bold text-slate-800">{currentProject.created_by}</p>
+                                                    <span className="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-bold uppercase">Owner</span>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {projectMembers.map((member) => (
+                                            <div key={member} className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-100 hover:bg-slate-50 transition-colors">
+                                                <div className="flex items-center gap-2">
+                                                    <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-xs font-bold text-slate-500">
+                                                        {member.substring(0, 2).toUpperCase()}
+                                                    </div>
+                                                    <p className="text-sm font-medium text-slate-700">{member}</p>
+                                                </div>
+                                                {member !== userEmail && (
+                                                    <button
+                                                        onClick={() => setProjectMembers(prev => prev.filter(m => m !== member))}
+                                                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                                        title="Remove member"
+                                                    >
+                                                        <Trash2 className="w-4 h-4" />
+                                                    </button>
+                                                )}
+                                                {member === userEmail && (
+                                                    <span className="text-[10px] text-slate-400 italic px-2">It's you</span>
+                                                )}
+                                            </div>
+                                        ))}
+
+                                        {projectMembers.length === 0 && (
+                                            <div className="text-center py-8 text-slate-400 text-sm">
+                                                No additional members
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="flex gap-3 mt-6">
                                 <button
                                     onClick={() => setIsProjectSettingsOpen(false)}
                                     className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold rounded-xl transition-all"
@@ -1802,23 +1914,40 @@ export default function DrivePage() {
                                     onClick={async () => {
                                         setIsSavingSettings(true);
                                         try {
-                                            const res = await fetch('/api/projects/settings', {
+                                            // Sending flattened structure as per new API design
+                                            const payload = {
+                                                id: currentProject.id, // API expects 'id' in body or uses param? PATCH route uses body.id
+                                                notify_on_activity: projectSettings.notify_on_activity,
+                                                version_retention_limit: projectSettings.version_retention_limit,
+                                                read_only: projectSettings.read_only,
+                                                members: projectMembers
+                                            };
+
+                                            const res = await fetch('/api/projects', { // Endpoint changed to /api/projects for PATCH
                                                 method: 'PATCH',
                                                 headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({
-                                                    projectId: currentProject.id,
-                                                    settings: projectSettings
-                                                })
+                                                body: JSON.stringify(payload)
                                             });
+
                                             if (res.ok) {
                                                 showToast("Settings saved successfully", "success");
-                                                setCurrentProject(prev => prev ? { ...prev, settings: projectSettings } : null);
+                                                // Update local state deeply
+                                                setCurrentProject(prev => {
+                                                    if (!prev) return null;
+                                                    return {
+                                                        ...prev,
+                                                        settings: projectSettings, // Maintain nested structure for local usage
+                                                        members: projectMembers
+                                                    };
+                                                });
                                                 setIsProjectSettingsOpen(false);
                                             } else {
-                                                throw new Error("Failed to save settings");
+                                                const err = await res.json();
+                                                throw new Error(err.error || "Failed to save settings");
                                             }
-                                        } catch (e) {
-                                            showToast("Failed to save settings", "error");
+                                        } catch (e: any) {
+                                            console.error(e);
+                                            showToast(e.message || "Failed to save settings", "error");
                                         } finally {
                                             setIsSavingSettings(false);
                                         }

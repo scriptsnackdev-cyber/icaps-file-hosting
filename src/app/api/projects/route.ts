@@ -160,3 +160,73 @@ export async function DELETE(request: NextRequest) {
         return NextResponse.json({ error: e.message }, { status: 500 });
     }
 }
+
+export async function PATCH(request: NextRequest) {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    // Check Admin
+    const { data: whitelistUser } = await supabase
+        .from('whitelist')
+        .select('role')
+        .eq('email', user.email)
+        .single();
+
+    if (whitelistUser?.role !== 'admin') {
+        return NextResponse.json({ error: 'Forbidden: Admins only' }, { status: 403 });
+    }
+
+    try {
+        const body = await request.json();
+        const { id, notify_on_activity, version_retention_limit, read_only, members } = body;
+
+        if (!id) return NextResponse.json({ error: 'Project ID required' }, { status: 400 });
+
+        // 1. Update project settings
+        const updateData: any = {};
+        if (typeof notify_on_activity !== 'undefined') updateData.notify_on_activity = notify_on_activity;
+        if (typeof version_retention_limit !== 'undefined') updateData.version_retention_limit = version_retention_limit;
+        if (typeof read_only !== 'undefined') updateData.read_only = read_only;
+
+        if (Object.keys(updateData).length > 0) {
+            const { error: updateError } = await supabase
+                .from('projects')
+                .update(updateData)
+                .eq('id', id);
+
+            if (updateError) throw updateError;
+        }
+
+        // 2. Update members if provided
+        if (members && Array.isArray(members)) {
+            // Delete existing members
+            const { error: deleteError } = await supabase
+                .from('project_members')
+                .delete()
+                .eq('project_id', id);
+
+            if (deleteError) throw deleteError;
+
+            // Insert new members
+            const memberInserts = members.map((email: string) => ({
+                project_id: id,
+                user_email: email
+            }));
+
+            if (memberInserts.length > 0) {
+                const { error: insertError } = await supabase
+                    .from('project_members')
+                    .insert(memberInserts);
+
+                if (insertError) throw insertError;
+            }
+        }
+
+        return NextResponse.json({ success: true });
+
+    } catch (e: any) {
+        return NextResponse.json({ error: e.message }, { status: 500 });
+    }
+}
