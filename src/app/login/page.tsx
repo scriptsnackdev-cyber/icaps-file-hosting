@@ -1,17 +1,23 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/utils/supabase/client';
-import { Mail, Loader2, ShieldCheck, Cloud, AlertCircle } from 'lucide-react';
+import { Mail, Loader2, ShieldCheck, Cloud, AlertCircle, KeyRound, ArrowLeft } from 'lucide-react';
 
 export default function LoginPage() {
     const [email, setEmail] = useState('');
+    const [otp, setOtp] = useState('');
+    const [step, setStep] = useState<'email' | 'otp'>('email');
     const [isLoading, setIsLoading] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+    const router = useRouter();
+    const searchParams = useSearchParams();
+    const redirectTo = searchParams.get('redirect') || '/';
 
     const supabase = createClient();
 
-    const handleLogin = async (e: React.FormEvent) => {
+    const handleSendOtp = async (e: React.FormEvent) => {
         e.preventDefault();
         setIsLoading(true);
         setMessage(null);
@@ -33,41 +39,68 @@ export default function LoginPage() {
                 .single();
 
             if (whitelistError || !whitelistData) {
-                // Artificial delay to prevent enumeration timing attacks (optional, but good practice)
+                // Artificial delay to prevent enumeration timing attacks
                 await new Promise(resolve => setTimeout(resolve, 500));
                 throw new Error('Access Denied: Your email is not whitelisted.');
             }
 
-            // 3. User is whitelisted, proceed to send Magic Link
+            // 3. User is whitelisted, proceed to send OTP
             const { error } = await supabase.auth.signInWithOtp({
                 email,
-                options: {
-                    emailRedirectTo: `${window.location.origin}/auth/callback`,
-                },
             });
 
             if (error) {
                 throw error;
             }
 
+            setStep('otp');
             setMessage({
                 type: 'success',
-                text: 'Magic link sent! Check your email to sign in.',
+                text: 'OTP sent! Check your email for the code.',
             });
         } catch (error: any) {
-            // Handle "Row not found" specifically if needed, but the check above covers it
-            if (error.code === 'PGRST116') { // Supabase code for no rows returned from .single()
-                setMessage({ type: 'error', text: 'Access Denied: Your email is not whitelisted - 001.' });
+            if (error.code === 'PGRST116') { // Row not found
+                setMessage({ type: 'error', text: 'Access Denied: Your email is not whitelisted.' });
             } else {
-                let errorMessage = error.message || 'Failed to sign in';
-
-                // Friendly error for rate limits
+                let errorMessage = error.message || 'Failed to send OTP';
                 if (errorMessage.includes('rate limit exceeded') || error.status === 429) {
-                    errorMessage = 'Too many login attempts. Please wait 60 seconds before trying again.';
+                    errorMessage = 'Too many attempts. Please wait 60 seconds.';
                 }
-
                 setMessage({ type: 'error', text: errorMessage });
             }
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleVerifyOtp = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setIsLoading(true);
+        setMessage(null);
+
+        if (!otp) {
+            setMessage({ type: 'error', text: 'Please enter the OTP code.' });
+            setIsLoading(false);
+            return;
+        }
+
+        try {
+            const { error } = await supabase.auth.verifyOtp({
+                email,
+                token: otp,
+                type: 'email',
+            });
+
+            if (error) {
+                throw error;
+            }
+
+            // Success - Redirect
+            router.push(redirectTo);
+            router.refresh();
+
+        } catch (error: any) {
+            setMessage({ type: 'error', text: error.message || 'Invalid OTP code.' });
         } finally {
             setIsLoading(false);
         }
@@ -84,44 +117,104 @@ export default function LoginPage() {
                         <div className="w-16 h-16 bg-gradient-to-tr from-blue-100 to-indigo-100 rounded-2xl flex items-center justify-center mx-auto mb-4 text-blue-600 shadow-sm">
                             <Cloud className="w-8 h-8" />
                         </div>
-                        <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Welcome Back</h1>
-                        <p className="text-slate-500 mt-2">Sign in to manage your files securely</p>
+                        <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
+                            {step === 'email' ? 'Welcome Back' : 'Enter OTP'}
+                        </h1>
+                        <p className="text-slate-500 mt-2">
+                            {step === 'email'
+                                ? 'Sign in to manage your files securely'
+                                : `Code sent to ${email}`
+                            }
+                        </p>
                     </div>
 
-                    <form onSubmit={handleLogin} className="space-y-4">
-                        <div>
-                            <label htmlFor="email" className="block text-sm font-medium text-slate-700 mb-1.5">Email Address</label>
-                            <div className="relative">
-                                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
-                                    <Mail className="w-5 h-5" />
+                    {step === 'email' ? (
+                        <form onSubmit={handleSendOtp} className="space-y-4">
+                            <div>
+                                <label htmlFor="email" className="block text-sm font-medium text-slate-700 mb-1.5">Email Address</label>
+                                <div className="relative">
+                                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                                        <Mail className="w-5 h-5" />
+                                    </div>
+                                    <input
+                                        id="email"
+                                        type="email"
+                                        placeholder="name@company.com"
+                                        value={email}
+                                        onChange={(e) => setEmail(e.target.value)}
+                                        className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-all outline-none bg-slate-50 focus:bg-white text-slate-800"
+                                        required
+                                        autoFocus
+                                    />
                                 </div>
-                                <input
-                                    id="email"
-                                    type="email"
-                                    placeholder="name@company.com"
-                                    value={email}
-                                    onChange={(e) => setEmail(e.target.value)}
-                                    className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-all outline-none bg-slate-50 focus:bg-white text-slate-800"
-                                    required
-                                />
                             </div>
-                        </div>
 
-                        <button
-                            type="submit"
-                            disabled={isLoading}
-                            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-xl transition-all shadow-md hover:shadow-lg disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                        >
-                            {isLoading ? (
-                                <>
-                                    <Loader2 className="w-5 h-5 animate-spin" />
-                                    <span>Verifying...</span>
-                                </>
-                            ) : (
-                                <span>Send Magic Link</span>
-                            )}
-                        </button>
-                    </form>
+                            <button
+                                type="submit"
+                                disabled={isLoading}
+                                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-xl transition-all shadow-md hover:shadow-lg disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                            >
+                                {isLoading ? (
+                                    <>
+                                        <Loader2 className="w-5 h-5 animate-spin" />
+                                        <span>Sending...</span>
+                                    </>
+                                ) : (
+                                    <span>Send Code</span>
+                                )}
+                            </button>
+                        </form>
+                    ) : (
+                        <form onSubmit={handleVerifyOtp} className="space-y-4">
+                            <div>
+                                <label htmlFor="otp" className="block text-sm font-medium text-slate-700 mb-1.5">One-Time Password</label>
+                                <div className="relative">
+                                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                                        <KeyRound className="w-5 h-5" />
+                                    </div>
+                                    <input
+                                        id="otp"
+                                        type="text"
+                                        placeholder="12345678"
+                                        value={otp}
+                                        onChange={(e) => setOtp(e.target.value.trim())}
+                                        className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-all outline-none bg-slate-50 focus:bg-white text-slate-800 tracking-widest font-mono"
+                                        required
+                                        autoFocus
+                                        maxLength={8}
+                                    />
+                                </div>
+                            </div>
+
+                            <button
+                                type="submit"
+                                disabled={isLoading}
+                                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-xl transition-all shadow-md hover:shadow-lg disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                            >
+                                {isLoading ? (
+                                    <>
+                                        <Loader2 className="w-5 h-5 animate-spin" />
+                                        <span>Verifying...</span>
+                                    </>
+                                ) : (
+                                    <span>Verify Code</span>
+                                )}
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setStep('email');
+                                    setMessage(null);
+                                    setOtp('');
+                                }}
+                                className="w-full bg-white hover:bg-slate-50 text-slate-600 font-medium py-2.5 rounded-xl transition-all border border-slate-200 flex items-center justify-center gap-2"
+                            >
+                                <ArrowLeft className="w-4 h-4" />
+                                <span>Back to Email</span>
+                            </button>
+                        </form>
+                    )}
 
                     <div className="mt-8 flex items-center justify-center gap-2 text-xs text-slate-400">
                         <ShieldCheck className="w-4 h-4" />

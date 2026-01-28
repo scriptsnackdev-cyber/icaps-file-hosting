@@ -32,10 +32,8 @@ export function Sidebar() {
             {/* App Logo */}
             <div className="h-16 flex items-center px-6 border-b border-slate-100">
                 <div className="flex items-center gap-3 text-blue-600">
-                    <div className="p-2 bg-blue-50 rounded-lg">
-                        <Cloud className="w-6 h-6" />
-                    </div>
-                    <span className="font-bold text-lg tracking-tight text-slate-800">CloudPoint</span>
+                    <img src="/ICAPS.png" alt="ICAPS Logo" className="w-10 h-10 object-contain" />
+                    <span className="font-bold text-xl tracking-tight text-slate-800">ICAPS CLOUD</span>
                 </div>
             </div>
 

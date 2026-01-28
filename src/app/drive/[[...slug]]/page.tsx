@@ -5,7 +5,8 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import {
     Cloud, Search, Plus, Loader2, FolderPlus, FileUp, Home as HomeIcon,
     ChevronRight, Copy, Share2, Download, Trash2, FileText, Folder,
-    Settings, MoreVertical, Upload, FolderUp
+    Settings, MoreVertical, Upload, FolderUp, Lock, Globe, Users, X, Check,
+    AlertCircle, ArrowUpCircle, RotateCcw, History
 } from 'lucide-react';
 import { StorageNode, Project } from '@/types';
 import { createClient } from '@/utils/supabase/client';
@@ -97,6 +98,102 @@ export default function DrivePage() {
     const [newProjectQuota, setNewProjectQuota] = useState(100); // GB
     const [newProjectMembers, setNewProjectMembers] = useState<string[]>([]);
     const [whitelist, setWhitelist] = useState<string[]>([]);
+    const [conflictInfo, setConflictInfo] = useState<{
+        file: File,
+        parentId: string | null,
+        taskId?: string,
+        data: any
+    } | null>(null);
+    const [isVersionHistoryOpen, setIsVersionHistoryOpen] = useState(false);
+    const [versionNodes, setVersionNodes] = useState<StorageNode[]>([]);
+    const [selectedHistoryNode, setSelectedHistoryNode] = useState<StorageNode | null>(null);
+    const [isRollingBack, setIsRollingBack] = useState(false);
+    const [pendingRollback, setPendingRollback] = useState<StorageNode | null>(null);
+
+    // Share Modal State
+    const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+    const [shareConfig, setShareConfig] = useState<{
+        scope: 'PRIVATE' | 'PUBLIC';
+        passwordEnabled: boolean;
+        password: string;
+    }>({ scope: 'PRIVATE', passwordEnabled: false, password: '' });
+    const [isSavingShare, setIsSavingShare] = useState(false);
+    const [shareNodeId, setShareNodeId] = useState<string | null>(null);
+    const [contextMenu, setContextMenu] = useState<{ x: number, y: number, node: StorageNode } | null>(null);
+
+    const [isDownloading, setIsDownloading] = useState(false);
+
+    const handleDownloadCurrentFolder = () => {
+        if (!currentFolderId) return;
+        setIsDownloading(true);
+        window.location.href = `/api/drive/zip?folderId=${currentFolderId}`;
+        setTimeout(() => setIsDownloading(false), 2000);
+    };
+
+    useEffect(() => {
+        const handleClick = () => setContextMenu(null);
+        window.addEventListener('click', handleClick);
+        return () => window.removeEventListener('click', handleClick);
+    }, []);
+
+    const handleContextMenu = (e: React.MouseEvent, node: StorageNode) => {
+        e.preventDefault();
+        e.stopPropagation(); // Prevent triggering row click
+        setContextMenu({ x: e.clientX, y: e.clientY, node });
+    };
+
+    const [draggedNode, setDraggedNode] = useState<StorageNode | null>(null);
+    const [dragOverNodeId, setDragOverNodeId] = useState<string | null>(null);
+
+    const handleMoveNode = async (sourceNode: StorageNode, targetFolderId: string) => {
+        if (sourceNode.id === targetFolderId) return; // Cannot move into self
+
+        const toastId = addTask('UPLOAD', `Moving ${sourceNode.name}...`); // Reusing UPLOAD type for generic loading
+        try {
+            const res = await fetch('/api/drive', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: sourceNode.id,
+                    parentId: targetFolderId
+                })
+            });
+
+            if (!res.ok) throw new Error('Failed to move item');
+
+            updateTask(toastId, 'SUCCESS');
+            showToast(`Moved "${sourceNode.name}"`, 'success');
+            fetchNodes(); // Refresh list to remove moved item
+        } catch (e) {
+            console.error(e);
+            updateTask(toastId, 'ERROR');
+            showToast("Failed to move item", "error");
+        }
+    };
+
+    const openShareModalForNode = async (nodeId: string) => {
+        try {
+            const { data, error } = await supabase
+                .from('storage_nodes')
+                .select('sharing_scope, share_password')
+                .eq('id', nodeId)
+                .single();
+
+            if (error) throw error;
+
+            setShareNodeId(nodeId);
+            setShareConfig({
+                scope: (data.sharing_scope as 'PRIVATE' | 'PUBLIC') || 'PRIVATE',
+                passwordEnabled: !!data.share_password,
+                password: data.share_password || ''
+            });
+            setIsShareModalOpen(true);
+
+        } catch (e) {
+            console.error(e);
+            showToast("Failed to fetch share settings", "error");
+        }
+    };
 
     useEffect(() => {
         const fetchWhitelist = async () => {
@@ -190,11 +287,11 @@ export default function DrivePage() {
                 setLoading(false);
             }
         }
-    }, [urlProjectId, folderPathKey, router, showToast]);
+    }, [urlProjectId, folderPathKey, router, showToast, nodes.length, loading]);
 
     useEffect(() => {
         fetchNodes();
-    }, [urlProjectId, folderPathKey]); // Fetch nodes whenever URL project or path changes
+    }, [urlProjectId, folderPathKey, fetchNodes]); // Fetch nodes whenever URL project or path changes
 
     useEffect(() => {
         if (isCreatingFolder && newFolderInputRef.current) {
@@ -331,31 +428,30 @@ export default function DrivePage() {
     const isUploadingRef = useRef(false);
 
     // Generic Upload Logic
-    const uploadFileToId = async (file: File, parentId: string | null, existingTaskId?: string) => {
-        // Use clean name for display, but let's try standard upload for reliability first
-        // If file.name contains path, we handle it.
+    const uploadFileToId = async (file: File, parentId: string | null, existingTaskId?: string, resolution?: 'update' | 'overwrite') => {
         const cleanName = file.name.split('/').pop()?.split('\\').pop() || file.name;
-
-        // If task ID exists, use it, otherwise create new (for single file upload)
         const taskId = existingTaskId || addTask('UPLOAD', cleanName);
 
         const formData = new FormData();
-        // Use cleanName to ensure only the filename is sent (no paths)
-        // Correct folder structure is handled via parentId
         formData.append('file', file, cleanName);
-
         if (parentId) formData.append('parentId', parentId);
         if (currentProject) formData.append('projectId', currentProject.id);
+        if (resolution) formData.append('resolution', resolution);
 
         try {
-            // We pass the signal to fetch for true cancellation if supported
             const signal = abortControllerRef.current?.signal;
-
             const res = await fetch('/api/drive/upload', {
                 method: 'POST',
                 body: formData,
                 signal
             });
+
+            if (res.status === 409) {
+                // Conflict detected
+                const data = await res.json();
+                setConflictInfo({ file, parentId, taskId, data: data.existing });
+                return;
+            }
 
             if (!res.ok) {
                 const errorText = await res.text();
@@ -364,6 +460,8 @@ export default function DrivePage() {
             }
 
             updateTask(taskId, 'SUCCESS');
+            fetchNodes(); // Refresh immediately after success
+            refreshStorage(); // Update quota
         } catch (err: any) {
             if (err.name === 'AbortError' || (abortControllerRef.current?.signal.aborted)) {
                 updateTask(taskId, 'CANCELLED');
@@ -379,13 +477,12 @@ export default function DrivePage() {
     const uploadFile = async (file: File) => {
         // Wrapper for current folder
         await uploadFileToId(file, currentFolderId);
-        fetchNodes();
-        refreshStorage();
     }
 
     const getOrCreateFolder = async (name: string, parentId: string | null): Promise<string> => {
         const res = await fetch('/api/drive', {
             method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ type: 'FOLDER', name, parentId, projectId: currentProject?.id })
         });
         if (!res.ok) throw new Error("Failed to create folder structure");
@@ -565,9 +662,14 @@ export default function DrivePage() {
     };
 
     // Drag and Drop Logic
+    // Drag and Drop Logic
     const handleDrag = (e: React.DragEvent) => {
         e.preventDefault();
         e.stopPropagation();
+
+        // If we are dragging an internal node (Move), ignore file upload overlay
+        if (draggedNode) return;
+
         if (e.type === "dragenter" || e.type === "dragover") {
             setDragActive(true);
         } else if (e.type === "dragleave") {
@@ -580,7 +682,10 @@ export default function DrivePage() {
         e.stopPropagation();
         setDragActive(false);
 
-        // Simple Drop supports files currently. 
+        // If dragging internal node, ignore main drop area (Move happens in row onDrop)
+        if (draggedNode) return;
+
+        // Simple Drop supports files currently.
         if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
             for (let i = 0; i < e.dataTransfer.files.length; i++) {
                 await uploadFileToId(e.dataTransfer.files[i], currentFolderId);
@@ -589,8 +694,8 @@ export default function DrivePage() {
             refreshStorage();
         }
         // NOTE: Full folder drop support requires DataTransferItem.webkitGetAsEntry() recursion
-        // which is complex to implement robustly in one step. 
-        // For "Folder Upload" via Drop, users often expect it to just work. 
+        // which is complex to implement robustly in one step.
+        // For "Folder Upload" via Drop, users often expect it to just work.
         // The File Input "directory" attribute is safer for this specific request flow.
     };
 
@@ -621,15 +726,124 @@ export default function DrivePage() {
     };
 
     // Sharing Top Bar
-    const handleShareCurrentFolder = () => {
+    // Sharing Top Bar
+    const handleShareClick = async () => {
         if (!currentFolderId) {
             showToast("Cannot share root drive. Please enter a folder.", 'error');
             return;
         }
 
-        const link = `${window.location.origin}/share/${currentFolderId}?perm=VIEW&scope=PUBLIC`;
-        navigator.clipboard.writeText(link);
-        showToast("Folder Link copied to clipboard!", 'success');
+        try {
+            // Fetch current node settings
+            const { data, error } = await supabase
+                .from('storage_nodes')
+                .select('sharing_scope, share_password')
+                .eq('id', currentFolderId)
+                .single();
+
+            if (error) throw error;
+
+            setShareNodeId(currentFolderId);
+            setShareConfig({
+                scope: (data.sharing_scope as 'PRIVATE' | 'PUBLIC') || 'PRIVATE',
+                passwordEnabled: !!data.share_password,
+                password: data.share_password || ''
+            });
+            setIsShareModalOpen(true);
+
+        } catch (e) {
+            console.error(e);
+            showToast("Failed to fetch share settings", "error");
+        }
+    };
+
+    const handleSaveShare = async () => {
+        if (!shareNodeId) return;
+        setIsSavingShare(true);
+
+        try {
+            const updates = {
+                id: shareNodeId,
+                sharing_scope: shareConfig.scope,
+                share_password: (shareConfig.scope === 'PUBLIC' && shareConfig.passwordEnabled && shareConfig.password)
+                    ? shareConfig.password
+                    : null // Send null to clear password if disabled or private
+            };
+
+            const res = await fetch('/api/drive', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(updates)
+            });
+
+            if (!res.ok) throw new Error("Failed to update share settings");
+
+            // Generate Link
+            const link = `${window.location.origin}/share/${shareNodeId}`;
+            navigator.clipboard.writeText(link);
+
+            showToast("Settings saved & Link copied!", "success");
+            setIsShareModalOpen(false);
+
+        } catch (e) {
+            showToast("Failed to save share settings", "error");
+        } finally {
+            setIsSavingShare(false);
+        }
+    };
+
+    const fetchVersionHistory = async (node: StorageNode) => {
+        if (node.type !== 'FILE') {
+            showToast("Version history is only available for files.", "info");
+            return;
+        }
+        setSelectedHistoryNode(node);
+        setIsVersionHistoryOpen(true);
+        try {
+            const res = await fetch(`/api/drive/versions?nodeId=${node.id}`);
+            if (!res.ok) throw new Error('Failed to fetch version history');
+            const data = await res.json();
+            setVersionNodes(data || []);
+        } catch (e) {
+            console.error("Error fetching version history:", e);
+            showToast("Failed to load version history.", "error");
+            setIsVersionHistoryOpen(false);
+        }
+    };
+
+    const handleRollback = async (versionToRollback: StorageNode) => {
+        if (!selectedHistoryNode || !versionToRollback) return;
+        setPendingRollback(versionToRollback); // Trigger custom overlay
+    };
+
+    const confirmRollbackExecute = async () => {
+        if (!selectedHistoryNode || !pendingRollback) return;
+
+        setIsRollingBack(true);
+        const versionToRestore = pendingRollback;
+        setPendingRollback(null); // Close confirmation
+
+        try {
+            const res = await fetch('/api/drive/versions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    nodeId: versionToRestore.id
+                })
+            });
+
+            if (!res.ok) throw new Error('Failed to rollback file');
+
+            showToast(`"${selectedHistoryNode.name}" restored to version ${versionToRestore.version}`, 'success');
+            setIsVersionHistoryOpen(false);
+            fetchNodes(); // Refresh the main file list
+            refreshStorage(); // Update quota
+        } catch (e) {
+            console.error("Error rolling back file:", e);
+            showToast("Failed to roll back file.", "error");
+        } finally {
+            setIsRollingBack(false);
+        }
     };
 
     return (
@@ -758,13 +972,22 @@ export default function DrivePage() {
 
                             {/* Controls */}
                             <div className="flex bg-slate-100 p-1 rounded-lg gap-1 relative">
+
                                 <button
-                                    onClick={handleShareCurrentFolder}
+                                    onClick={handleShareClick}
                                     disabled={!currentFolderId}
                                     className="flex items-center gap-2 px-3 py-1.5 bg-white text-slate-700 rounded-md shadow-sm border border-slate-200 hover:text-blue-600 hover:border-blue-200 transition-all text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
                                     <Share2 className="w-4 h-4" />
                                     Share
+                                </button>
+                                <button
+                                    onClick={handleDownloadCurrentFolder}
+                                    disabled={!currentFolderId || isDownloading}
+                                    className="flex items-center gap-2 px-3 py-1.5 bg-white text-slate-700 rounded-md shadow-sm border border-slate-200 hover:text-blue-600 hover:border-blue-200 transition-all text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    {isDownloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                                    Download
                                 </button>
                                 <button
                                     onClick={handleCreateFolderClick}
@@ -836,7 +1059,7 @@ export default function DrivePage() {
                                             <th className="px-6 py-4">Name</th>
                                             <th className="px-6 py-4">Owner</th>
                                             <th className="px-6 py-4">Modified</th>
-                                            <th className="px-6 py-4 text-right">Actions</th>
+
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-100">
@@ -882,8 +1105,40 @@ export default function DrivePage() {
                                         {nodes.map(node => (
                                             <tr
                                                 key={node.id}
-                                                className="hover:bg-blue-50/30 group transition-all cursor-pointer duration-200"
+                                                draggable={isAdmin || node.owner_email === userEmail}
+                                                onDragStart={(e) => {
+                                                    if (!(isAdmin || node.owner_email === userEmail)) {
+                                                        e.preventDefault();
+                                                        return;
+                                                    }
+                                                    setDraggedNode(node);
+                                                    e.dataTransfer.effectAllowed = 'move';
+                                                }}
+                                                onDragOver={(e) => {
+                                                    if (draggedNode && node.type === 'FOLDER' && node.id !== draggedNode.id) {
+                                                        e.preventDefault(); // Allow drop
+                                                        e.stopPropagation();
+                                                        setDragOverNodeId(node.id);
+                                                        e.dataTransfer.dropEffect = 'move';
+                                                    }
+                                                }}
+                                                onDragLeave={(e) => {
+                                                    if (dragOverNodeId === node.id) {
+                                                        setDragOverNodeId(null);
+                                                    }
+                                                }}
+                                                onDrop={(e) => {
+                                                    e.preventDefault();
+                                                    e.stopPropagation(); // Stop main drop zone from triggering
+                                                    setDragOverNodeId(null);
+                                                    if (draggedNode && node.type === 'FOLDER' && node.id !== draggedNode.id) {
+                                                        handleMoveNode(draggedNode, node.id);
+                                                        setDraggedNode(null);
+                                                    }
+                                                }}
+                                                className={`group transition-all cursor-pointer duration-200 ${dragOverNodeId === node.id ? 'bg-blue-100 ring-2 ring-inset ring-blue-500 z-10' : 'hover:bg-blue-50/30'}`}
                                                 onClick={() => { if (node.type === 'FOLDER') navigateToFolder(node) }}
+                                                onContextMenu={(e) => handleContextMenu(e, node)}
                                             >
                                                 <td className="px-6 py-3">
                                                     <div className="flex items-center gap-4">
@@ -897,7 +1152,14 @@ export default function DrivePage() {
                                                             </div>
                                                         )}
                                                         <div>
-                                                            <p className="font-medium text-slate-700 group-hover:text-blue-700 transition-colors">{node.name}</p>
+                                                            <p className="font-medium text-slate-700 group-hover:text-blue-700 transition-colors flex items-center gap-2">
+                                                                {node.name}
+                                                                {node.version && node.version > 1 && (
+                                                                    <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-600 border border-blue-200">
+                                                                        v{node.version}
+                                                                    </span>
+                                                                )}
+                                                            </p>
                                                             {node.type === 'FILE' && (
                                                                 <p className="text-xs text-slate-400">{(node.size! / 1024).toFixed(1)} KB</p>
                                                             )}
@@ -914,35 +1176,6 @@ export default function DrivePage() {
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-slate-500 font-mono text-xs">
                                                     {format(new Date(node.updated_at), 'MMM d, yyyy')}
-                                                </td>
-                                                <td className="px-6 py-3 text-right">
-                                                    <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-all transform translate-x-2 group-hover:translate-x-0" onClick={e => e.stopPropagation()}>
-                                                        {node.type === 'FILE' && (
-                                                            <button
-                                                                onClick={() => window.open(`/api/files/${encodeURIComponent(node.r2_key!)}?filename=${encodeURIComponent(node.name)}`)}
-                                                                className="p-2 text-slate-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors" title="Download"
-                                                            >
-                                                                <Download className="w-4 h-4" />
-                                                            </button>
-                                                        )}
-                                                        <button
-                                                            onClick={(e) => {
-                                                                if (isAdmin || node.owner_email === userEmail) {
-                                                                    handleDelete(node);
-                                                                } else {
-                                                                    showToast("Access Denied: You can only delete your own files.", "error");
-                                                                }
-                                                            }}
-                                                            className={`p-2 rounded-lg transition-colors ${isAdmin || node.owner_email === userEmail
-                                                                ? 'text-slate-400 hover:text-red-600 hover:bg-red-50'
-                                                                : 'text-slate-200 cursor-not-allowed'
-                                                                }`}
-                                                            title={isAdmin || node.owner_email === userEmail ? "Delete" : "You cannot delete this item"}
-                                                            disabled={!isAdmin && node.owner_email !== userEmail}
-                                                        >
-                                                            <Trash2 className="w-4 h-4" />
-                                                        </button>
-                                                    </div>
                                                 </td>
                                             </tr>
                                         ))}
@@ -1067,11 +1300,374 @@ export default function DrivePage() {
                 </div>
             )}
 
+            {/* Share Modal */}
+            {isShareModalOpen && (
+                <div className="fixed inset-0 bg-slate-900/60 z-[100] flex items-center justify-center backdrop-blur-sm animate-in fade-in duration-200">
+                    <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl scale-100 animate-in zoom-in-95 duration-200 transform overflow-hidden">
+                        <div className="p-6 border-b border-slate-100 flex justify-between items-center">
+                            <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                                <Share2 className="w-5 h-5 text-blue-600" />
+                                Share Settings
+                            </h3>
+                            <button
+                                onClick={() => setIsShareModalOpen(false)}
+                                className="text-slate-400 hover:text-slate-600 transition-colors"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="p-6 space-y-6">
+                            {/* Access Level */}
+                            <div className="space-y-3">
+                                <label className="text-sm font-semibold text-slate-900 block mb-2">Access Level</label>
+
+                                <label className={`flex items-start gap-3 p-3 rounded-xl border-2 cursor-pointer transition-all ${shareConfig.scope === 'PRIVATE' ? 'border-blue-500 bg-blue-50/50' : 'border-slate-100 hover:border-slate-200'}`}>
+                                    <input
+                                        type="radio"
+                                        name="scope"
+                                        className="sr-only"
+                                        checked={shareConfig.scope === 'PRIVATE'}
+                                        onChange={() => setShareConfig(p => ({ ...p, scope: 'PRIVATE' }))}
+                                    />
+                                    <div className={`mt-0.5 p-1.5 rounded-lg ${shareConfig.scope === 'PRIVATE' ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>
+                                        <Users className="w-5 h-5" />
+                                    </div>
+                                    <div>
+                                        <div className="font-semibold text-slate-800">Private</div>
+                                        <div className="text-sm text-slate-500">Only project members can access</div>
+                                    </div>
+                                    {shareConfig.scope === 'PRIVATE' && <Check className="w-5 h-5 text-blue-600 ml-auto mt-1" />}
+                                </label>
+
+                                <label className={`flex items-start gap-3 p-3 rounded-xl border-2 cursor-pointer transition-all ${shareConfig.scope === 'PUBLIC' ? 'border-blue-500 bg-blue-50/50' : 'border-slate-100 hover:border-slate-200'}`}>
+                                    <input
+                                        type="radio"
+                                        name="scope"
+                                        className="sr-only"
+                                        checked={shareConfig.scope === 'PUBLIC'}
+                                        onChange={() => setShareConfig(p => ({ ...p, scope: 'PUBLIC' }))}
+                                    />
+                                    <div className={`mt-0.5 p-1.5 rounded-lg ${shareConfig.scope === 'PUBLIC' ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>
+                                        <Globe className="w-5 h-5" />
+                                    </div>
+                                    <div>
+                                        <div className="font-semibold text-slate-800">Public</div>
+                                        <div className="text-sm text-slate-500">Anyone with the link can view</div>
+                                    </div>
+                                    {shareConfig.scope === 'PUBLIC' && <Check className="w-5 h-5 text-blue-600 ml-auto mt-1" />}
+                                </label>
+                            </div>
+
+                            {/* Public Options */}
+                            {shareConfig.scope === 'PUBLIC' && (
+                                <div className="pl-4 border-l-2 border-slate-100 ml-4 animate-in slide-in-from-top-2 fade-in duration-300">
+                                    <label className="flex items-center gap-3 cursor-pointer group">
+                                        <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${shareConfig.passwordEnabled ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-slate-300'}`}>
+                                            {shareConfig.passwordEnabled && <Check className="w-3.5 h-3.5" />}
+                                        </div>
+                                        <input
+                                            type="checkbox"
+                                            className="sr-only"
+                                            checked={shareConfig.passwordEnabled}
+                                            onChange={(e) => setShareConfig(p => ({ ...p, passwordEnabled: e.target.checked }))}
+                                        />
+                                        <span className="font-medium text-slate-700 flex items-center gap-2">
+                                            <Lock className="w-4 h-4 text-slate-400" />
+                                            Protect with Password
+                                        </span>
+                                    </label>
+
+                                    {shareConfig.passwordEnabled && (
+                                        <div className="mt-3">
+                                            <input
+                                                type="text"
+                                                placeholder="Enter password..."
+                                                value={shareConfig.password}
+                                                onChange={(e) => setShareConfig(p => ({ ...p, password: e.target.value }))}
+                                                className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all font-mono text-sm"
+                                            />
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="p-6 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
+                            <button
+                                onClick={() => setIsShareModalOpen(false)}
+                                className="px-5 py-2.5 text-slate-600 hover:bg-white hover:shadow-sm border border-transparent hover:border-slate-200 rounded-xl font-medium transition-all"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleSaveShare}
+                                disabled={isSavingShare}
+                                className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold shadow-lg shadow-blue-200 transition-all flex items-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
+                            >
+                                {isSavingShare ? (
+                                    <>
+                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                        Saving...
+                                    </>
+                                ) : (
+                                    <>
+                                        <Copy className="w-4 h-4" />
+                                        Save & Copy Link
+                                    </>
+                                )}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <TaskProgress
                 tasks={tasks}
                 onClearCompleted={clearCompletedTasks}
                 onStop={handleStopUpload}
             />
+
+            {/* Context Menu */}
+            {contextMenu && (
+                <div
+                    className="fixed bg-white rounded-lg shadow-xl border border-slate-100 py-1 z-[100] min-w-[160px] animate-in fade-in zoom-in-95 duration-100"
+                    style={{ top: contextMenu.y, left: contextMenu.x }}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    {contextMenu.node.type === 'FILE' && (
+                        <button
+                            onClick={() => {
+                                window.open(`/api/files/${encodeURIComponent(contextMenu.node.r2_key!)}?filename=${encodeURIComponent(contextMenu.node.name)}`);
+                                setContextMenu(null);
+                            }}
+                            className="w-full text-left px-4 py-2.5 hover:bg-slate-50 text-sm text-slate-700 flex items-center gap-2"
+                        >
+                            <Download className="w-4 h-4 text-slate-500" />
+                            Download
+                        </button>
+                    )}
+
+                    <button
+                        onClick={() => {
+                            openShareModalForNode(contextMenu.node.id);
+                            setContextMenu(null);
+                        }}
+                        className="w-full text-left px-4 py-2.5 hover:bg-slate-50 text-sm text-slate-700 flex items-center gap-2"
+                    >
+                        <Share2 className="w-4 h-4 text-slate-500" />
+                        Share
+                    </button>
+
+                    <button
+                        onClick={() => {
+                            if (isAdmin || contextMenu.node.owner_email === userEmail) {
+                                fetchVersionHistory(contextMenu.node);
+                            } else {
+                                showToast("Access Denied", "error");
+                            }
+                            setContextMenu(null);
+                        }}
+                        className="w-full text-left px-4 py-2.5 hover:bg-slate-50 text-sm text-slate-700 flex items-center gap-2"
+                    >
+                        <History className="w-4 h-4 text-slate-500" />
+                        Version History
+                    </button>
+
+                    <div className="my-1 border-t border-slate-100"></div>
+
+                    <button
+                        onClick={() => {
+                            if (isAdmin || contextMenu.node.owner_email === userEmail) {
+                                handleDelete(contextMenu.node);
+                            } else {
+                                showToast("Access Denied: You can only delete your own files.", "error");
+                            }
+                            setContextMenu(null);
+                        }}
+                        className={`w-full text-left px-4 py-2.5 text-sm flex items-center gap-2 ${isAdmin || contextMenu.node.owner_email === userEmail
+                            ? 'text-red-600 hover:bg-red-50'
+                            : 'text-slate-300 cursor-not-allowed'
+                            }`}
+                    >
+                        <Trash2 className="w-4 h-4" />
+                        Delete
+                    </button>
+                </div>
+            )}
+            {/* Version History Modal */}
+            {isVersionHistoryOpen && selectedHistoryNode && (
+                <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-[2px] z-[60] flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden animate-in fade-in zoom-in duration-200">
+                        <div className="p-6">
+                            <div className="flex items-center justify-between mb-6">
+                                <div className="flex items-center gap-3">
+                                    <div className="p-2 bg-blue-50 text-blue-600 rounded-lg">
+                                        <History className="w-5 h-5" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-900">Version History</h3>
+                                        <p className="text-xs text-slate-500 truncate max-w-[300px]">{selectedHistoryNode.name}</p>
+                                    </div>
+                                </div>
+                                <button onClick={() => setIsVersionHistoryOpen(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+                                    <X className="w-5 h-5 text-slate-400" />
+                                </button>
+                            </div>
+
+                            <div className="space-y-1 max-h-[400px] overflow-y-auto pr-1 custom-scrollbar">
+                                {versionNodes.map((v, idx) => (
+                                    <div key={v.id} className={`flex items-center justify-between p-4 rounded-xl border ${idx === 0 ? 'bg-blue-50/30 border-blue-100 ring-1 ring-blue-100' : 'border-slate-100 hover:bg-slate-50'} transition-all`}>
+                                        <div className="flex items-center gap-4">
+                                            <div className="flex flex-col items-center">
+                                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${idx === 0 ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-600'}`}>
+                                                    v{v.version}
+                                                </span>
+                                                {idx === 0 && <span className="text-[9px] text-blue-600 font-bold mt-1 uppercase">Active</span>}
+                                            </div>
+                                            <div>
+                                                <p className="text-sm font-semibold text-slate-800">
+                                                    {format(new Date(v.updated_at), 'MMM d, yyyy · HH:mm')}
+                                                </p>
+                                                <p className="text-xs text-slate-500 flex items-center gap-2">
+                                                    <span>{(v.size! / 1024).toFixed(1)} KB</span>
+                                                    <span className="w-1 h-1 bg-slate-300 rounded-full"></span>
+                                                    <span>{v.owner_email?.split('@')[0]}</span>
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={() => window.open(`/api/files/${encodeURIComponent(v.r2_key!)}?filename=${encodeURIComponent(v.name)}`)}
+                                                className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                                                title="Download this version"
+                                            >
+                                                <Download className="w-4 h-4" />
+                                            </button>
+
+                                            {idx !== 0 && (
+                                                <button
+                                                    onClick={() => handleRollback(v)}
+                                                    disabled={isRollingBack}
+                                                    className="px-3 py-1.5 text-xs font-bold text-slate-600 hover:text-blue-600 hover:bg-blue-50 border border-slate-200 hover:border-blue-200 rounded-lg transition-all flex items-center gap-1.5 disabled:opacity-50"
+                                                >
+                                                    <RotateCcw className="w-3.5 h-3.5" />
+                                                    Roll Back
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <div className="mt-6 flex justify-end">
+                                <button
+                                    onClick={() => setIsVersionHistoryOpen(false)}
+                                    className="px-6 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-all"
+                                >
+                                    Done
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Conflict Modal */}
+            {conflictInfo && (
+                <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-[2px] z-[60] flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-200">
+                        <div className="p-6">
+                            <div className="flex items-center gap-4 mb-6">
+                                <div className="p-3 bg-amber-50 text-amber-600 rounded-xl">
+                                    <AlertCircle className="w-6 h-6" />
+                                </div>
+                                <h3 className="text-xl font-bold text-slate-900">File Already Exists</h3>
+                            </div>
+
+                            <p className="text-slate-600 mb-6 leading-relaxed">
+                                A file named <span className="font-semibold text-slate-900 text-sm break-all">"{conflictInfo.file.name}"</span> already exists in this folder. What would you like to do?
+                            </p>
+
+                            <div className="space-y-3">
+                                <button
+                                    onClick={() => {
+                                        uploadFileToId(conflictInfo.file, conflictInfo.parentId, conflictInfo.taskId, 'update');
+                                        setConflictInfo(null);
+                                    }}
+                                    className="w-full flex flex-col items-start p-4 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-xl transition-all group"
+                                >
+                                    <div className="flex items-center gap-2 font-bold mb-0.5">
+                                        <ArrowUpCircle className="w-4 h-4" />
+                                        Update Version
+                                    </div>
+                                    <div className="text-xs text-blue-600/80">Save as a new version (v{conflictInfo.data.version + 1})</div>
+                                </button>
+
+                                {conflictInfo.data.isOwnerOrAdmin && (
+                                    <button
+                                        onClick={() => {
+                                            uploadFileToId(conflictInfo.file, conflictInfo.parentId, conflictInfo.taskId, 'overwrite');
+                                            setConflictInfo(null);
+                                        }}
+                                        className="w-full flex flex-col items-start p-4 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-xl transition-all group"
+                                    >
+                                        <div className="flex items-center gap-2 font-bold mb-0.5">
+                                            <RotateCcw className="w-4 h-4" />
+                                            Overwrite
+                                        </div>
+                                        <div className="text-xs text-slate-500">Replace current version with this file</div>
+                                    </button>
+                                )}
+
+                                <button
+                                    onClick={() => {
+                                        if (conflictInfo.taskId) updateTask(conflictInfo.taskId, 'CANCELLED');
+                                        setConflictInfo(null);
+                                    }}
+                                    className="w-full py-3 text-slate-500 hover:text-slate-700 font-medium transition-colors"
+                                >
+                                    Cancel Upload
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {/* Rollback Confirmation Overlay */}
+            {pendingRollback && (
+                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4 animate-in fade-in duration-200">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200">
+                        <div className="p-8 text-center">
+                            <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-4 border-4 border-blue-100/50">
+                                <RotateCcw className="w-8 h-8" />
+                            </div>
+                            <h3 className="text-xl font-bold text-slate-900 mb-2">Confirm Rollback</h3>
+                            <p className="text-slate-500 text-sm leading-relaxed mb-6">
+                                Are you sure you want to restore <span className="font-bold text-slate-800">"{selectedHistoryNode?.name}"</span> to <span className="text-blue-600 font-bold underline">version {pendingRollback.version}</span>?
+                                <br />
+                                <span className="text-[10px] opacity-70 mt-2 block">(This will create a new version copy)</span>
+                            </p>
+
+                            <div className="flex flex-col gap-2">
+                                <button
+                                    onClick={confirmRollbackExecute}
+                                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition-all shadow-lg shadow-blue-200 flex items-center justify-center gap-2"
+                                >
+                                    Confirm Restore
+                                </button>
+                                <button
+                                    onClick={() => setPendingRollback(null)}
+                                    className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-3 rounded-xl transition-all"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

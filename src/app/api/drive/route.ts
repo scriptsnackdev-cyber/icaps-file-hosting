@@ -94,8 +94,22 @@ export async function GET(request: NextRequest) {
         }
 
         const { data: nodes, error: childrenError } = await childrenQuery;
-
         if (childrenError) throw childrenError;
+
+        // Version Control Filter: Show only the latest version of each file name
+        const latestNodesMap = new Map<string, any>();
+        (nodes || []).forEach(node => {
+            const existing = latestNodesMap.get(node.name);
+            if (!existing || (node.version || 1) > (existing.version || 1)) {
+                latestNodesMap.set(node.name, node);
+            }
+        });
+        const filteredNodes = Array.from(latestNodesMap.values())
+            .sort((a, b) => {
+                // Keep the original sorting: Folders first, then Name
+                if (a.type !== b.type) return b.type === 'FOLDER' ? 1 : -1;
+                return a.name.localeCompare(b.name);
+            });
 
         // Fetch latest project stats for quota update
         const { data: project } = await supabase
@@ -105,7 +119,7 @@ export async function GET(request: NextRequest) {
             .single();
 
         return NextResponse.json({
-            nodes: nodes || [],
+            nodes: filteredNodes,
             currentFolderId: currentFolderId,
             breadcrumbs: chain,
             project: project
@@ -319,6 +333,73 @@ export async function DELETE(request: NextRequest) {
 
     } catch (error: any) {
         console.error("Delete Error:", error);
+        return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+}
+
+export async function PATCH(request: NextRequest) {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    try {
+        const body = await request.json();
+        const { id, sharing_scope, share_password, parentId } = body;
+
+        if (!id) {
+            return NextResponse.json({ error: 'Node ID is required' }, { status: 400 });
+        }
+
+        // 1. Fetch Node to check ownership
+        const { data: node, error: fetchError } = await supabase
+            .from('storage_nodes')
+            .select('*')
+            .eq('id', id)
+            .single();
+
+        if (fetchError || !node) {
+            return NextResponse.json({ error: 'Node not found' }, { status: 404 });
+        }
+
+        // 2. Check Permissions
+        const { data: whitelistData } = await supabase
+            .from('whitelist')
+            .select('role')
+            .eq('email', user.email)
+            .single();
+
+        const isAdmin = whitelistData?.role === 'admin';
+        const isOwner = node.created_by === user.id || node.owner_email === user.email;
+
+        if (!isAdmin && !isOwner) {
+            return NextResponse.json({ error: 'Access Denied' }, { status: 403 });
+        }
+
+        // 3. Update Node
+        const updates: any = {};
+        if (sharing_scope) updates.sharing_scope = sharing_scope;
+        if (parentId !== undefined) updates.parent_id = parentId; // Support for Moving
+        // Allow setting password to null (empty string/null)
+        if (share_password !== undefined) updates.share_password = share_password;
+
+        updates.updated_at = new Date().toISOString();
+
+        const { data: updatedNode, error: updateError } = await supabase
+            .from('storage_nodes')
+            .update(updates)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (updateError) throw updateError;
+
+        return NextResponse.json(updatedNode);
+
+    } catch (error: any) {
+        console.error("Update Error:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }

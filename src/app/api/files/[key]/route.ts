@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GetObjectCommand, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET_NAME } from '@/lib/r2';
 import { createClient } from '@/utils/supabase/server';
+import { supabaseAdmin } from '@/lib/supabase-admin';
 
 // Helper to check Authorization and Whitelist
 async function checkAuth() {
@@ -26,8 +27,12 @@ async function logActivity(action: 'UPLOAD' | 'DOWNLOAD' | 'DELETE', fileKey: st
 
     // Fire and forget (don't await) unless critical
     // Ideally we await to ensure log is written
-    await supabase.from('access_logs').insert({
-        user_email: user?.email || 'anonymous',
+    const email = user?.email || 'anonymous'; // Update to handle anonymous logging
+
+    // We use admin client here if user is not logged in to ensure log is written? 
+    // Actually access_logs might require auth. Let's use service role for logging to be safe if anonymous.
+    await supabaseAdmin.from('access_logs').insert({
+        user_email: email,
         action: action,
         file_key: fileKey,
     });
@@ -41,10 +46,30 @@ export async function GET(
     const decodedKey = decodeURIComponent(key);
 
     try {
-        // Enforce Auth for Download too? Usually yes for private files.
         const { isWhitelisted } = await checkAuth();
-        // If you want strict privacy, un-comment this:
-        if (!isWhitelisted) {
+        let hasAccess = isWhitelisted;
+
+        if (!hasAccess) {
+            // Check Public Access via Database
+            const { data: node } = await supabaseAdmin
+                .from('storage_nodes')
+                .select('sharing_scope, share_password')
+                .eq('r2_key', decodedKey)
+                .maybeSingle(); // Use maybeSingle to avoid 406 if multiple (shouldn't happen, but safe) or 0
+
+            if (node && node.sharing_scope === 'PUBLIC') {
+                if (node.share_password) {
+                    const pwd = request.nextUrl.searchParams.get('pwd');
+                    if (pwd === node.share_password) {
+                        hasAccess = true;
+                    }
+                } else {
+                    hasAccess = true;
+                }
+            }
+        }
+
+        if (!hasAccess) {
             return new NextResponse('Unauthorized: Access Restricted', { status: 403 });
         }
 
