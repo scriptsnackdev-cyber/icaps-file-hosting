@@ -14,7 +14,7 @@ export async function sendActivityNotification({
     to: string;
     projectName: string;
     userName: string;
-    action: 'UPLOADED' | 'DELETED' | 'VERSION_UPDATED';
+    action: 'UPLOADED' | 'DELETED' | 'VERSION_UPDATEDs';
     fileName: string;
     timestamp: string;
 }) {
