@@ -215,12 +215,12 @@ export default function SharePage() {
 
     return (
         <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
-            <div className="mb-8 text-center">
-                <div className="w-16 h-16 bg-white rounded-xl flex items-center justify-center mx-auto mb-3">
+            <div className="mb-8 text-center flex flex-col items-center">
+                <div className="w-32 h-32 bg-white rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-sm border border-slate-100 p-2">
                     <img src="/ICAPS.png" alt="ICAPS Logo" className="w-full h-full object-contain" />
                 </div>
-                <h1 className="text-2xl font-bold text-slate-800">Shared Item</h1>
-                <p className="text-slate-500">You have been given access to this content</p>
+                <h1 className="text-3xl font-bold text-slate-800 tracking-tight">Shared Item</h1>
+                <p className="text-slate-500 font-medium">You have been given access to this content</p>
             </div>
 
             <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-100">
@@ -272,6 +272,14 @@ export default function SharePage() {
                         <p className="text-xs text-slate-400">Shared via ICAPS CLOUD</p>
                     </div>
                 </div>
+            </div>
+            <div className="mt-12 text-center">
+                <p className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-1">
+                    © 2026 ICAPS Clouds Software
+                </p>
+                <p className="text-xs text-slate-400 font-medium flex items-center justify-center gap-1.5">
+                    Powered by <span className="text-blue-500 font-bold">Script Snack Dev</span>
+                </p>
             </div>
         </div>
     );

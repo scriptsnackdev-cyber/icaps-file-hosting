@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/utils/supabase/server';
 import { DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET_NAME } from '@/lib/r2';
+import { sendActivityNotification } from '@/lib/resend';
 
 export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
@@ -140,7 +141,7 @@ export async function POST(request: NextRequest) {
 
     try {
         const body = await request.json();
-        const { type, name, parentId, projectId } = body;
+        const { type, name, parentId, projectId, silent } = body;
 
         if (!projectId) {
             return NextResponse.json({ error: 'Project context required' }, { status: 400 });
@@ -162,6 +163,13 @@ export async function POST(request: NextRequest) {
             } else {
                 return NextResponse.json({ error: 'Project not found' }, { status: 404 });
             }
+        }
+
+        // --- READ ONLY CHECK ---
+        const { data: projectData } = await supabase.from('projects').select('settings').eq('id', resolvedProjectId).single();
+        const { data: userRole } = await supabase.from('whitelist').select('role').eq('email', user.email).single();
+        if (projectData?.settings?.read_only && userRole?.role !== 'admin') {
+            return NextResponse.json({ error: 'This project is in Read-Only mode.' }, { status: 403 });
         }
 
         if (type !== 'FOLDER') {
@@ -200,6 +208,26 @@ export async function POST(request: NextRequest) {
         }).select().single();
 
         if (error) throw error;
+
+        // --- EMAIL NOTIFICATION for Folders ---
+        try {
+            if (!silent && resolvedProjectId && type === 'FOLDER') {
+                const { data: project } = await supabase.from('projects').select('name, created_by, settings').eq('id', resolvedProjectId).single();
+                if (project && project.created_by !== user.id && project.settings?.notify_on_activity) {
+                    const { data: rootFolder } = await supabase.from('storage_nodes').select('owner_email').eq('project_id', resolvedProjectId).is('parent_id', null).limit(1).single();
+                    if (rootFolder?.owner_email) {
+                        await sendActivityNotification({
+                            to: rootFolder.owner_email,
+                            projectName: project.name,
+                            userName: user.email || 'Unknown User',
+                            action: 'UPLOADED',
+                            fileName: name,
+                            timestamp: new Date().toLocaleString()
+                        });
+                    }
+                }
+            }
+        } catch (e) { console.error("Notification failed", e); }
 
         return NextResponse.json(data);
 
@@ -251,25 +279,45 @@ export async function DELETE(request: NextRequest) {
 
         if (error) throw error;
 
+        // Keep track of names already processed in this folder to avoid redundant version deletions
+        const processedFileNames = new Set<string>();
+
         // 2. Process children
         if (children && children.length > 0) {
             for (const child of children) {
                 if (child.type === 'FOLDER') {
                     await deleteNodeRecursively(child.id);
                 } else {
-                    // It's a file
-                    totalDeletedSize += (child.size || 0);
-                    if (child.r2_key) {
-                        try {
-                            await r2.send(new DeleteObjectCommand({
-                                Bucket: R2_BUCKET_NAME,
-                                Key: child.r2_key,
-                            }));
-                        } catch (e) {
-                            console.error(`Failed to delete R2 object ${child.r2_key}`, e);
+                    // It's a file - ensure we delete ALL versions of this file in this folder
+                    if (!processedFileNames.has(child.name)) {
+                        processedFileNames.add(child.name);
+
+                        // Fetch all versions of this specific file in this specific parent
+                        const { data: allVersions } = await supabase
+                            .from('storage_nodes')
+                            .select('*')
+                            .eq('project_id', child.project_id)
+                            .eq('name', child.name)
+                            .eq('type', 'FILE')
+                            .eq('parent_id', nodeId); // All versions MUST share the same parent in our logic
+
+                        if (allVersions) {
+                            for (const v of allVersions) {
+                                totalDeletedSize += (v.size || 0);
+                                if (v.r2_key) {
+                                    try {
+                                        await r2.send(new DeleteObjectCommand({
+                                            Bucket: R2_BUCKET_NAME,
+                                            Key: v.r2_key,
+                                        }));
+                                    } catch (e) {
+                                        console.error(`Failed to delete R2 object ${v.r2_key}`, e);
+                                    }
+                                }
+                                await supabase.from('storage_nodes').delete().eq('id', v.id);
+                            }
                         }
                     }
-                    await supabase.from('storage_nodes').delete().eq('id', child.id);
                 }
             }
         }
@@ -305,31 +353,94 @@ export async function DELETE(request: NextRequest) {
             return NextResponse.json({ error: 'Access Denied: You can only delete your own files.' }, { status: 403 });
         }
 
+        // --- READ ONLY CHECK ---
+        const { data: projectData } = await supabase.from('projects').select('settings').eq('id', targetNode.project_id).single();
+        if (projectData?.settings?.read_only && !isAdmin) {
+            return NextResponse.json({ error: 'This project is in Read-Only mode.' }, { status: 403 });
+        }
+
         const targetProjectId = targetNode.project_id;
 
         if (targetNode.type === 'FILE') {
-            totalDeletedSize = targetNode.size || 0;
-            if (targetNode.r2_key) {
-                await r2.send(new DeleteObjectCommand({
-                    Bucket: R2_BUCKET_NAME,
-                    Key: targetNode.r2_key,
-                }));
+            if (isAdmin) {
+                // Admin deletes ALL versions
+                let query = supabase.from('storage_nodes')
+                    .select('*')
+                    .eq('project_id', targetNode.project_id)
+                    .eq('name', targetNode.name)
+                    .eq('type', 'FILE');
+
+                if (targetNode.parent_id) {
+                    query = query.eq('parent_id', targetNode.parent_id);
+                } else {
+                    query = query.is('parent_id', null);
+                }
+
+                const { data: allVersions } = await query;
+
+                if (allVersions) {
+                    for (const v of allVersions) {
+                        totalDeletedSize += (v.size || 0);
+                        if (v.r2_key) {
+                            try {
+                                await r2.send(new DeleteObjectCommand({
+                                    Bucket: R2_BUCKET_NAME,
+                                    Key: v.r2_key,
+                                }));
+                            } catch (e) {
+                                console.error(`Failed to delete R2 object ${v.r2_key}`, e);
+                            }
+                        }
+                        await supabase.from('storage_nodes').delete().eq('id', v.id);
+                    }
+                }
+            } else {
+                // Regular Owner deletes only THIS version
+                totalDeletedSize = targetNode.size || 0;
+                if (targetNode.r2_key) {
+                    await r2.send(new DeleteObjectCommand({
+                        Bucket: R2_BUCKET_NAME,
+                        Key: targetNode.r2_key,
+                    }));
+                }
+                const { error: delError } = await supabase.from('storage_nodes').delete().eq('id', id);
+                if (delError) throw delError;
             }
-            const { error: delError } = await supabase.from('storage_nodes').delete().eq('id', id);
-            if (delError) throw delError;
         } else {
+            // Folder recursion
             await deleteNodeRecursively(id);
         }
 
-        // Update Project Usage (Decrement)
-        if (totalDeletedSize > 0 && targetProjectId) {
-            await supabase.rpc('decrement_project_storage', {
-                p_id: targetProjectId,
-                amount: totalDeletedSize
+        // Update Project Quota
+        if (totalDeletedSize > 0 && resolvedProjectId) {
+            await supabase.rpc('update_project_storage', {
+                project_id: resolvedProjectId,
+                size_delta: -totalDeletedSize
             });
         }
 
-        return NextResponse.json({ success: true });
+        // --- EMAIL NOTIFICATION ---
+        try {
+            if (resolvedProjectId) {
+                const { data: project } = await supabase.from('projects').select('name, created_by, settings').eq('id', resolvedProjectId).single();
+                if (project && project.created_by !== user.id && project.settings?.notify_on_activity) {
+                    // Find root folder owner email
+                    const { data: rootFolder } = await supabase.from('storage_nodes').select('owner_email').eq('project_id', resolvedProjectId).is('parent_id', null).limit(1).single();
+                    if (rootFolder?.owner_email) {
+                        await sendActivityNotification({
+                            to: rootFolder.owner_email,
+                            projectName: project.name,
+                            userName: user.email || 'Unknown User',
+                            action: 'DELETED',
+                            fileName: targetNode.name,
+                            timestamp: new Date().toLocaleString()
+                        });
+                    }
+                }
+            }
+        } catch (e) { console.error("Notification failed", e); }
+
+        return NextResponse.json({ success: true, deletedSize: totalDeletedSize });
 
     } catch (error: any) {
         console.error("Delete Error:", error);
@@ -373,6 +484,12 @@ export async function PATCH(request: NextRequest) {
 
         const isAdmin = whitelistData?.role === 'admin';
         const isOwner = node.created_by === user.id || node.owner_email === user.email;
+
+        // --- READ ONLY CHECK ---
+        const { data: projectData } = await supabase.from('projects').select('settings').eq('id', node.project_id).single();
+        if (projectData?.settings?.read_only && !isAdmin) {
+            return NextResponse.json({ error: 'This project is in Read-Only mode.' }, { status: 403 });
+        }
 
         if (!isAdmin && !isOwner) {
             return NextResponse.json({ error: 'Access Denied' }, { status: 403 });

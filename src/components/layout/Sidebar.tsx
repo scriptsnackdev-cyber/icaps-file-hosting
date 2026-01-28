@@ -1,7 +1,7 @@
 'use client';
 
-import React from 'react';
-import { Home, FolderOpen, Clock, Star, Trash2, Cloud, Settings, LogOut } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Home, FolderOpen, Clock, Star, Trash2, Cloud, Settings, LogOut, FolderPlus } from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
 
 import { useStorage } from '@/contexts/StorageContext';
@@ -21,6 +21,22 @@ export function Sidebar() {
     const pathname = usePathname();
     const { totalSize } = useStorage();
     const { isAdmin, userEmail, signOut } = useAuth();
+    const [projects, setProjects] = useState<any[]>([]);
+
+    useEffect(() => {
+        const fetchProjects = async () => {
+            try {
+                const res = await fetch('/api/projects');
+                if (res.ok) {
+                    const data = await res.json();
+                    setProjects(data);
+                }
+            } catch (err) {
+                console.error("Failed to fetch projects for sidebar", err);
+            }
+        };
+        fetchProjects();
+    }, []);
 
     const navItems = [
         { icon: FolderOpen, label: 'My Files', path: '/drive' },
@@ -30,10 +46,9 @@ export function Sidebar() {
     return (
         <div className="w-64 bg-white border-r border-slate-200 h-screen flex flex-col fixed left-0 top-0 z-20 hidden md:flex">
             {/* App Logo */}
-            <div className="h-16 flex items-center px-6 border-b border-slate-100">
-                <div className="flex items-center gap-3 text-blue-600">
-                    <img src="/ICAPS.png" alt="ICAPS Logo" className="w-10 h-10 object-contain" />
-                    <span className="font-bold text-xl tracking-tight text-slate-800">ICAPS CLOUD</span>
+            <div className="h-24 flex items-center justify-center border-b border-slate-100">
+                <div className="flex items-center text-blue-600">
+                    <img src="/ICAPS.png" alt="ICAPS Logo" className="w-32 h-auto object-contain" />
                 </div>
             </div>
 
@@ -58,22 +73,52 @@ export function Sidebar() {
 
                 <div className="pt-6 mt-6 border-t border-slate-100">
                     <div className="px-3 mb-2 text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                        Storage
+                        Projects
                     </div>
-                    <div className="px-3 py-2">
-                        <div className="flex items-center gap-3 text-sm font-medium text-slate-600 mb-2">
-                            <div className="p-2 bg-blue-50 text-blue-600 rounded-lg">
-                                <Cloud className="w-4 h-4" />
-                            </div>
-                            <span>
-                                {formatBytes(totalSize)} Used
-                            </span>
-                        </div>
-                        <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                            <div className="bg-blue-500 h-1.5 rounded-full w-3/4"></div>
-                        </div>
+                    <div className="space-y-1">
+                        {projects.length > 0 ? (
+                            projects.map((project) => {
+                                const isActive = pathname === `/drive/${project.id}` || pathname.startsWith(`/drive/${project.id}/`);
+                                return (
+                                    <button
+                                        key={project.id}
+                                        onClick={() => router.push(`/drive/${project.id}`)}
+                                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${isActive
+                                            ? 'bg-blue-50 text-blue-700 font-semibold'
+                                            : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                                            }`}
+                                    >
+                                        <FolderPlus className={`w-4 h-4 ${isActive ? 'text-blue-600' : 'text-slate-400'}`} />
+                                        <span className="truncate">{project.name}</span>
+                                    </button>
+                                );
+                            })
+                        ) : (
+                            <p className="px-3 py-2 text-xs text-slate-400 italic">No projects found</p>
+                        )}
                     </div>
                 </div>
+
+                {isAdmin && (
+                    <div className="pt-6 mt-6 border-t border-slate-100">
+                        <div className="px-3 mb-2 text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                            Storage
+                        </div>
+                        <div className="px-3 py-2">
+                            <div className="flex items-center gap-3 text-sm font-medium text-slate-600 mb-2">
+                                <div className="p-2 bg-blue-50 text-blue-600 rounded-lg">
+                                    <Cloud className="w-4 h-4" />
+                                </div>
+                                <span>
+                                    {formatBytes(totalSize)} Used
+                                </span>
+                            </div>
+                            <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                                <div className="bg-blue-500 h-1.5 rounded-full w-3/4"></div>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </nav>
 
             {/* Footer */}
@@ -93,6 +138,15 @@ export function Sidebar() {
                     <LogOut className="w-5 h-5" />
                     <span>Sign Out</span>
                 </button>
+
+                <div className="pt-4 border-t border-slate-50">
+                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider text-center">
+                        © 2026 ICAPS Clouds
+                    </p>
+                    <p className="text-[9px] text-slate-300 font-medium text-center">
+                        Power by Script Snack Dev
+                    </p>
+                </div>
             </div>
         </div>
     );

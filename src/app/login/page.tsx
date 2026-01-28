@@ -231,6 +231,15 @@ export default function LoginPage() {
                     </div>
                 )}
             </div>
+
+            <div className="mt-8 text-center">
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">
+                    © 2026 ICAPS Clouds Software
+                </p>
+                <p className="text-[10px] text-slate-400 font-medium">
+                    Power by <span className="text-blue-500 font-bold">Script Snack Dev</span>
+                </p>
+            </div>
         </div>
     );
 }

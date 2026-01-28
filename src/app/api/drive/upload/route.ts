@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { PutObjectCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET_NAME } from '@/lib/r2';
 import { createClient } from '@/utils/supabase/server';
 import { v4 as uuidv4 } from 'uuid';
+import { sendActivityNotification } from '@/lib/resend';
 
 export async function POST(request: NextRequest) {
     const supabase = await createClient();
@@ -22,6 +23,7 @@ export async function POST(request: NextRequest) {
         const parentId = formData.get('parentId') as string | null;
         const projectId = formData.get('projectId') as string | null;
         const resolution = formData.get('resolution') as 'update' | 'overwrite' | null;
+        const silent = formData.get('silent') === 'true';
 
         if (!file) return NextResponse.json({ error: 'No file provided' }, { status: 400 });
         if (!projectId) return NextResponse.json({ error: 'Project context required' }, { status: 400 });
@@ -34,6 +36,13 @@ export async function POST(request: NextRequest) {
             const { data: projs } = await supabase.from('projects').select('id').eq('name', decodeURIComponent(projectId)).limit(1);
             if (projs && projs.length > 0) resolvedProjectId = projs[0].id;
             else return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+        }
+
+        // --- READ ONLY CHECK ---
+        const { data: projectData } = await supabase.from('projects').select('settings').eq('id', resolvedProjectId).single();
+        const { data: userRole } = await supabase.from('whitelist').select('role').eq('email', user.email).single();
+        if (projectData?.settings?.read_only && userRole?.role !== 'admin') {
+            return NextResponse.json({ error: 'This project is in Read-Only mode.' }, { status: 403 });
         }
 
         // --- CONFLICT CHECK ---
@@ -92,7 +101,7 @@ export async function POST(request: NextRequest) {
         // Fetch Project for quota...
         const { data: project, error: projError } = await supabase
             .from('projects')
-            .select('id, name, max_storage_bytes, current_storage_bytes')
+            .select('id, name, max_storage_bytes, current_storage_bytes, created_by, settings')
             .eq('id', resolvedProjectId)
             .single();
 
@@ -179,8 +188,102 @@ export async function POST(request: NextRequest) {
             console.error("RPC Error updating quota:", rpcError);
             // Fallback
             await supabase.from('projects')
-                .update({ current_storage_bytes: project.current_storage_bytes + file.size })
+                .update({ current_storage_bytes: project.current_storage_bytes + sizeDiff })
                 .eq('id', project.id);
+        }
+
+        // --- VERSION RETENTION ENFORCEMENT ---
+        try {
+            const retentionLimit = project.settings?.version_retention_limit;
+            if (retentionLimit && retentionLimit > 0) {
+                // Fetch all versions of this file in this project/folder
+                let vQuery = supabase.from('storage_nodes')
+                    .select('*')
+                    .eq('project_id', project.id)
+                    .eq('name', file.name)
+                    .eq('type', 'FILE')
+                    .order('version', { ascending: false });
+
+                if (parentId && parentId !== 'null') {
+                    vQuery = vQuery.eq('parent_id', parentId);
+                } else {
+                    vQuery = vQuery.is('parent_id', null);
+                }
+
+                const { data: allVersions } = await vQuery;
+
+                if (allVersions && allVersions.length > retentionLimit) {
+                    const toPurge = allVersions.slice(retentionLimit);
+                    let spaceFreed = 0;
+
+                    for (const v of toPurge) {
+                        if (v.r2_key) {
+                            try {
+                                await r2.send(new DeleteObjectCommand({
+                                    Bucket: R2_BUCKET_NAME,
+                                    Key: v.r2_key,
+                                }));
+                            } catch (e) { console.error(`Failed to purge physical file for v${v.version}`, e); }
+
+                            spaceFreed += (v.size || 0);
+
+                            // Mark as purged in DB: remove key and clear size
+                            await supabase.from('storage_nodes')
+                                .update({ r2_key: null, size: 0 })
+                                .eq('id', v.id);
+                        }
+                    }
+
+                    if (spaceFreed > 0) {
+                        // Update project quota (decrement)
+                        await supabase.rpc('update_project_storage', {
+                            project_id: project.id,
+                            size_delta: -spaceFreed
+                        });
+                    }
+                }
+            }
+        } catch (e) {
+            console.error("Version retention enforcement failed:", e);
+        }
+
+        // --- EMAIL NOTIFICATION ---
+        try {
+            const isOwner = project.created_by === user.id;
+            const settings = project.settings || {};
+
+            if (!silent && !isOwner && settings.notify_on_activity) {
+                // Find owner's email from the whitelist (where it should be)
+                const { data: whitelistOwner } = await supabase
+                    .from('whitelist')
+                    .select('email')
+                    .eq('email', node.owner_email) // Fallback or logic to find owner
+                    .limit(1);
+
+                // Since project owner is usually the creator, let's look for user who created the root folder
+                const { data: rootFolder } = await supabase
+                    .from('storage_nodes')
+                    .select('owner_email')
+                    .eq('project_id', project.id)
+                    .is('parent_id', null)
+                    .limit(1)
+                    .single();
+
+                const ownerEmail = rootFolder?.owner_email;
+
+                if (ownerEmail) {
+                    await sendActivityNotification({
+                        to: ownerEmail,
+                        projectName: project.name,
+                        userName: user.email || 'Unknown User',
+                        action: resolution === 'update' ? 'VERSION_UPDATED' : 'UPLOADED',
+                        fileName: file.name,
+                        timestamp: new Date().toLocaleString()
+                    });
+                }
+            }
+        } catch (e) {
+            console.error("Notification failed", e);
         }
 
         // 4. Log

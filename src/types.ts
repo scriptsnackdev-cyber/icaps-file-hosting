@@ -25,6 +25,11 @@ export interface Project {
     created_at: string;
     created_by: string;
     members?: string[]; // Array of emails for convenience
+    settings?: {
+        notify_on_activity?: boolean;
+        version_retention_limit?: number;
+        read_only?: boolean;
+    };
 }
 
 export interface WhitelistUser {

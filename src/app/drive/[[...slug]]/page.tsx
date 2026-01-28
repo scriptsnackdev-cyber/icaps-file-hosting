@@ -25,7 +25,7 @@ export default function DrivePage() {
     const slug = params.slug as string[] | undefined;
     const { showToast } = useToast();
     const { refreshStorage } = useStorage();
-    const { isAdmin, userEmail } = useAuth();
+    const { isAdmin, userEmail, userId } = useAuth();
 
     // Project structure: /drive/[projectId]/[...folders]
     const slugKey = slug?.join('/') || '';
@@ -110,6 +110,13 @@ export default function DrivePage() {
     const [isRollingBack, setIsRollingBack] = useState(false);
     const [pendingRollback, setPendingRollback] = useState<StorageNode | null>(null);
 
+    // Project Settings State
+    const [isProjectSettingsOpen, setIsProjectSettingsOpen] = useState(false);
+    const [projectSettings, setProjectSettings] = useState<{ notify_on_activity: boolean, version_retention_limit?: number, read_only?: boolean }>({ notify_on_activity: false, version_retention_limit: 0, read_only: false });
+    const [isSavingSettings, setIsSavingSettings] = useState(false);
+    const [itemToDelete, setItemToDelete] = useState<StorageNode | null>(null);
+    const [isDeleting, setIsDeleting] = useState(false);
+
     // Share Modal State
     const [isShareModalOpen, setIsShareModalOpen] = useState(false);
     const [shareConfig, setShareConfig] = useState<{
@@ -163,7 +170,7 @@ export default function DrivePage() {
 
             updateTask(toastId, 'SUCCESS');
             showToast(`Moved "${sourceNode.name}"`, 'success');
-            fetchNodes(); // Refresh list to remove moved item
+            fetchNodes(true); // Refresh list to remove moved item
         } catch (e) {
             console.error(e);
             updateTask(toastId, 'ERROR');
@@ -224,7 +231,7 @@ export default function DrivePage() {
 
     const lastFetchedRef = useRef<string>("");
 
-    const fetchNodes = useCallback(async () => {
+    const fetchNodes = useCallback(async (force: boolean = false) => {
         const projectIdToUse = urlProjectId;
         const currentFetchKey = `${projectIdToUse}-${folderPathKey}`;
 
@@ -234,7 +241,7 @@ export default function DrivePage() {
         }
 
         // Only fetch if something actually changed or we don't have nodes
-        if (lastFetchedRef.current === currentFetchKey && nodes.length > 0 && !loading) {
+        if (!force && lastFetchedRef.current === currentFetchKey && nodes.length > 0 && !loading) {
             return;
         }
 
@@ -402,7 +409,7 @@ export default function DrivePage() {
 
             if (res.ok) {
                 showToast('Folder created successfully', 'success');
-                fetchNodes();
+                fetchNodes(true);
             } else {
                 const err = await res.json();
                 showToast(err.error || 'Failed to create folder', 'error');
@@ -428,7 +435,7 @@ export default function DrivePage() {
     const isUploadingRef = useRef(false);
 
     // Generic Upload Logic
-    const uploadFileToId = async (file: File, parentId: string | null, existingTaskId?: string, resolution?: 'update' | 'overwrite') => {
+    const uploadFileToId = async (file: File, parentId: string | null, existingTaskId?: string, resolution?: 'update' | 'overwrite', silent?: boolean) => {
         const cleanName = file.name.split('/').pop()?.split('\\').pop() || file.name;
         const taskId = existingTaskId || addTask('UPLOAD', cleanName);
 
@@ -437,6 +444,7 @@ export default function DrivePage() {
         if (parentId) formData.append('parentId', parentId);
         if (currentProject) formData.append('projectId', currentProject.id);
         if (resolution) formData.append('resolution', resolution);
+        if (silent) formData.append('silent', 'true');
 
         try {
             const signal = abortControllerRef.current?.signal;
@@ -460,7 +468,7 @@ export default function DrivePage() {
             }
 
             updateTask(taskId, 'SUCCESS');
-            fetchNodes(); // Refresh immediately after success
+            fetchNodes(true); // Refresh immediately after success
             refreshStorage(); // Update quota
         } catch (err: any) {
             if (err.name === 'AbortError' || (abortControllerRef.current?.signal.aborted)) {
@@ -479,11 +487,11 @@ export default function DrivePage() {
         await uploadFileToId(file, currentFolderId);
     }
 
-    const getOrCreateFolder = async (name: string, parentId: string | null): Promise<string> => {
+    const getOrCreateFolder = async (name: string, parentId: string | null, silent?: boolean): Promise<string> => {
         const res = await fetch('/api/drive', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'FOLDER', name, parentId, projectId: currentProject?.id })
+            body: JSON.stringify({ type: 'FOLDER', name, parentId, projectId: currentProject?.id, silent })
         });
         if (!res.ok) throw new Error("Failed to create folder structure");
         const data = await res.json();
@@ -593,31 +601,43 @@ export default function DrivePage() {
                     realParentId = folderIdMap.get(parentPath) || currentFolderId;
                 }
 
-                const newId = await getOrCreateFolder(folderName, realParentId);
-                folderIdMap.set(folderPath, newId);
+                const folderId = await getOrCreateFolder(folderName, realParentId, true);
+                folderIdMap.set(folderPath, folderId);
             }
 
-            // 3. Upload Files
-            for (let i = 0; i < filesArray.length; i++) {
-                if (!isUploadingRef.current) break;
+            // 3. Upload all files sequentially
+            for (let i = 0; i < files.length; i++) {
+                if (!isUploadingRef.current) break; // STOP CHECK
 
-                const file = filesArray[i];
-                const taskId = fileTaskIds[i]; // Get pre-created ID
+                const file = files[i];
+                const pathParts = file.webkitRelativePath.split('/');
+                pathParts.pop(); // remove file name
+                const folderPath = pathParts.join('/');
 
-                const path = file.webkitRelativePath;
-                const parts = path.split('/');
-                parts.pop();
-                const dirPath = parts.join('/');
-
-                const targetId = dirPath ? folderIdMap.get(dirPath) : currentFolderId;
-                await uploadFileToId(file, targetId || null, taskId);
+                const parentId = folderIdMap.get(folderPath) || currentFolderId;
+                await uploadFileToId(file, parentId, fileTaskIds[i], undefined, true);
             }
 
-            fetchNodes();
+            // --- SEND SINGLE FOLDER NOTIFICATION ---
+            if (isUploadingRef.current && files.length > 0 && currentProject) {
+                const rootFolderName = files[0].webkitRelativePath.split('/')[0];
+                fetch('/api/projects/notify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        projectId: currentProject.id,
+                        action: 'UPLOADED',
+                        fileName: rootFolderName
+                    })
+                }).catch(e => console.error("Folder notification failed", e));
+            }
+
+            isUploadingRef.current = false;
+            fetchNodes(true);
             refreshStorage();
-
-        } catch (e) {
-            console.error(e);
+            setPendingFolderUpload(null);
+        } catch (err: any) {
+            console.error(err);
             showToast('Error creating folder structure', 'error');
         } finally {
             isUploadingRef.current = false;
@@ -634,22 +654,26 @@ export default function DrivePage() {
     };
 
     // Shared Deletion Logic
-    const handleDelete = async (node: StorageNode) => {
+    const handleDelete = (node: StorageNode) => {
+        setItemToDelete(node);
+    };
+
+    const confirmDeleteExecute = async () => {
+        if (!itemToDelete) return;
+
+        const node = itemToDelete;
+        setItemToDelete(null);
+        setIsDeleting(true);
+
         const itemType = node.type === 'FOLDER' ? 'folder' : 'file';
-        const warning = node.type === 'FOLDER'
-            ? `Are you sure you want to delete folder "${node.name}" and ALL its contents? This cannot be undone.`
-            : `Are you sure you want to delete "${node.name}"?`;
-
-        if (!confirm(warning)) return;
-
         const taskId = addTask('DELETE', node.name);
+
         try {
-            // New Unified Recursive Delete Endpoint
             const res = await fetch(`/api/drive?id=${node.id}&project=${currentProject?.id}`, { method: 'DELETE' });
 
             if (res.ok) {
                 updateTask(taskId, 'SUCCESS');
-                fetchNodes();
+                fetchNodes(true);
                 refreshStorage();
                 showToast(`${itemType === 'folder' ? 'Folder' : 'File'} deleted successfully`, 'success');
             } else {
@@ -658,6 +682,8 @@ export default function DrivePage() {
         } catch (err) {
             updateTask(taskId, 'ERROR');
             showToast(`Error deleting ${node.name}`, 'error');
+        } finally {
+            setIsDeleting(false);
         }
     };
 
@@ -690,7 +716,7 @@ export default function DrivePage() {
             for (let i = 0; i < e.dataTransfer.files.length; i++) {
                 await uploadFileToId(e.dataTransfer.files[i], currentFolderId);
             }
-            fetchNodes();
+            fetchNodes(true);
             refreshStorage();
         }
         // NOTE: Full folder drop support requires DataTransferItem.webkitGetAsEntry() recursion
@@ -901,13 +927,15 @@ export default function DrivePage() {
                                     </div>
                                 </div>
                             ))}
-                            <div
-                                onClick={() => setIsCreatingProject(true)}
-                                className="bg-slate-50 border-2 border-dashed border-slate-300 rounded-xl p-6 flex flex-col items-center justify-center text-slate-400 hover:border-blue-400 hover:text-blue-500 cursor-pointer transition-colors min-h-[200px]"
-                            >
-                                <Plus className="w-8 h-8 mb-2" />
-                                <span className="font-semibold">Create New Project</span>
-                            </div>
+                            {isAdmin && (
+                                <div
+                                    onClick={() => setIsCreatingProject(true)}
+                                    className="bg-slate-50 border-2 border-dashed border-slate-300 rounded-xl p-6 flex flex-col items-center justify-center text-slate-400 hover:border-blue-400 hover:text-blue-500 cursor-pointer transition-colors min-h-[200px]"
+                                >
+                                    <Plus className="w-8 h-8 mb-2" />
+                                    <span className="font-semibold">Create New Project</span>
+                                </div>
+                            )}
                         </div>
                     </div>
                 ) : (!currentProject && urlProjectId) ? (
@@ -922,18 +950,44 @@ export default function DrivePage() {
                             <button onClick={() => { setCurrentProject(null); router.push('/drive'); }} className="text-slate-400 hover:text-slate-700 transition-colors">
                                 <span className="text-sm">← Projects</span>
                             </button>
-                            <h2 className="text-xl font-bold text-slate-800 flex items-center gap-3">
-                                <span className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]"></span>
-                                {currentProject!.name}
-                                {loading && <Loader2 className="w-4 h-4 animate-spin text-blue-400" />}
-                            </h2>
+                            <div className="flex items-center gap-4">
+                                <h2 className="text-xl font-bold text-slate-800 flex items-center gap-3">
+                                    <span className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]"></span>
+                                    {currentProject!.name}
+                                    {currentProject?.settings?.read_only && (
+                                        <span className="flex items-center gap-1.5 px-2 py-0.5 bg-amber-50 text-amber-600 border border-amber-200 rounded text-[10px] font-bold uppercase tracking-wider shadow-sm animate-pulse">
+                                            <Lock className="w-3 h-3" />
+                                            Read Only
+                                        </span>
+                                    )}
+                                    {loading && <Loader2 className="w-4 h-4 animate-spin text-blue-400" />}
+                                </h2>
+                                {(isAdmin || currentProject?.created_by === userId) && (
+                                    <button
+                                        onClick={async () => {
+                                            const res = await fetch(`/api/projects/settings?projectId=${currentProject?.id}`);
+                                            if (res.ok) {
+                                                const data = await res.json();
+                                                setProjectSettings(data);
+                                                setIsProjectSettingsOpen(true);
+                                            }
+                                        }}
+                                        className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-blue-600 transition-all"
+                                        title="Project Settings"
+                                    >
+                                        <Settings className="w-4 h-4" />
+                                    </button>
+                                )}
+                            </div>
                         </div>
-                        <div className="text-sm text-slate-500 bg-white px-3 py-1.5 rounded-full border border-slate-200 shadow-sm">
-                            Quote:
-                            <span className={`font-semibold ml-1 ${(currentProject!.current_storage_bytes / currentProject!.max_storage_bytes) > 0.9 ? 'text-red-500' : 'text-slate-700'}`}>
-                                {(currentProject!.current_storage_bytes / (1024 * 1024)).toFixed(2)} MB
-                            </span>
-                            / {(currentProject!.max_storage_bytes / (1024 * 1024)).toFixed(0)} MB
+                        <div className="text-sm text-slate-500 bg-white px-3 py-1.5 rounded-full border border-slate-200 shadow-sm flex items-center justify-between">
+                            <div>
+                                Quote:
+                                <span className={`font-semibold ml-1 ${(currentProject!.current_storage_bytes / currentProject!.max_storage_bytes) > 0.9 ? 'text-red-500' : 'text-slate-700'}`}>
+                                    {(currentProject!.current_storage_bytes / (1024 * 1024)).toFixed(2)} MB
+                                </span>
+                                / {(currentProject!.max_storage_bytes / (1024 * 1024)).toFixed(0)} MB
+                            </div>
                         </div>
 
                         {/* Drag Overlay */}
@@ -972,7 +1026,6 @@ export default function DrivePage() {
 
                             {/* Controls */}
                             <div className="flex bg-slate-100 p-1 rounded-lg gap-1 relative">
-
                                 <button
                                     onClick={handleShareClick}
                                     disabled={!currentFolderId}
@@ -989,44 +1042,54 @@ export default function DrivePage() {
                                     {isDownloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
                                     Download
                                 </button>
-                                <button
-                                    onClick={handleCreateFolderClick}
-                                    className="flex items-center gap-2 px-3 py-1.5 bg-white text-slate-700 rounded-md shadow-sm border border-slate-200 hover:text-blue-600 hover:border-blue-200 transition-all text-sm font-medium"
-                                >
-                                    <FolderPlus className="w-4 h-4" />
-                                    New Folder
-                                </button>
 
-                                {/* Upload Menu */}
-                                <div className="relative">
-                                    <button
-                                        onClick={(e) => { e.stopPropagation(); setIsUploadMenuOpen(!isUploadMenuOpen); }}
-                                        className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white rounded-md shadow-sm hover:bg-blue-700 transition-all text-sm font-medium"
-                                    >
-                                        <FileUp className="w-4 h-4" />
-                                        Upload
-                                    </button>
+                                {currentProject?.settings?.read_only && !isAdmin ? (
+                                    <div className="flex items-center gap-2 px-4 py-1.5 bg-amber-50 text-amber-600 rounded-md border border-amber-200 text-xs font-bold uppercase tracking-wider">
+                                        <Lock className="w-3.5 h-3.5" />
+                                        Locked
+                                    </div>
+                                ) : (
+                                    <>
+                                        <button
+                                            onClick={handleCreateFolderClick}
+                                            className="flex items-center gap-2 px-3 py-1.5 bg-white text-slate-700 rounded-md shadow-sm border border-slate-200 hover:text-blue-600 hover:border-blue-200 transition-all text-sm font-medium"
+                                        >
+                                            <FolderPlus className="w-4 h-4" />
+                                            New Folder
+                                        </button>
 
-                                    {/* Dropdown */}
-                                    {isUploadMenuOpen && (
-                                        <div className="absolute top-full right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-100 overflow-hidden z-[60] animate-in fade-in zoom-in-95 duration-200">
+                                        {/* Upload Menu */}
+                                        <div className="relative">
                                             <button
-                                                onClick={() => fileInputRef.current?.click()}
-                                                className="w-full text-left px-4 py-3 hover:bg-slate-50 text-sm font-medium text-slate-700 flex items-center gap-3"
+                                                onClick={(e) => { e.stopPropagation(); setIsUploadMenuOpen(!isUploadMenuOpen); }}
+                                                className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white rounded-md shadow-sm hover:bg-blue-700 transition-all text-sm font-medium"
                                             >
-                                                <Upload className="w-4 h-4 text-blue-500" />
-                                                Upload Files
+                                                <FileUp className="w-4 h-4" />
+                                                Upload
                                             </button>
-                                            <button
-                                                onClick={triggerFolderUploadSelection}
-                                                className="w-full text-left px-4 py-3 hover:bg-slate-50 text-sm font-medium text-slate-700 flex items-center gap-3"
-                                            >
-                                                <FolderUp className="w-4 h-4 text-indigo-500" />
-                                                Upload Folder
-                                            </button>
+
+                                            {/* Dropdown */}
+                                            {isUploadMenuOpen && (
+                                                <div className="absolute top-full right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-100 overflow-hidden z-[60] animate-in fade-in zoom-in-95 duration-200">
+                                                    <button
+                                                        onClick={() => fileInputRef.current?.click()}
+                                                        className="w-full text-left px-4 py-3 hover:bg-slate-50 text-sm font-medium text-slate-700 flex items-center gap-3"
+                                                    >
+                                                        <Upload className="w-4 h-4 text-blue-500" />
+                                                        Upload Files
+                                                    </button>
+                                                    <button
+                                                        onClick={triggerFolderUploadSelection}
+                                                        className="w-full text-left px-4 py-3 hover:bg-slate-50 text-sm font-medium text-slate-700 flex items-center gap-3"
+                                                    >
+                                                        <FolderUp className="w-4 h-4 text-indigo-500" />
+                                                        Upload Folder
+                                                    </button>
+                                                </div>
+                                            )}
                                         </div>
-                                    )}
-                                </div>
+                                    </>
+                                )}
 
                                 {/* Hidden Inputs */}
                                 <input
@@ -1476,23 +1539,30 @@ export default function DrivePage() {
 
                     <div className="my-1 border-t border-slate-100"></div>
 
-                    <button
-                        onClick={() => {
-                            if (isAdmin || contextMenu.node.owner_email === userEmail) {
-                                handleDelete(contextMenu.node);
-                            } else {
-                                showToast("Access Denied: You can only delete your own files.", "error");
-                            }
-                            setContextMenu(null);
-                        }}
-                        className={`w-full text-left px-4 py-2.5 text-sm flex items-center gap-2 ${isAdmin || contextMenu.node.owner_email === userEmail
-                            ? 'text-red-600 hover:bg-red-50'
-                            : 'text-slate-300 cursor-not-allowed'
-                            }`}
-                    >
-                        <Trash2 className="w-4 h-4" />
-                        Delete
-                    </button>
+                    {currentProject?.settings?.read_only && !isAdmin ? (
+                        <div className="px-4 py-2 text-[10px] text-slate-400 font-bold uppercase tracking-wider flex items-center gap-2 italic">
+                            <Lock className="w-3 h-3" />
+                            Read Only Active
+                        </div>
+                    ) : (
+                        <button
+                            onClick={() => {
+                                if (isAdmin || contextMenu.node.owner_email === userEmail) {
+                                    handleDelete(contextMenu.node);
+                                } else {
+                                    showToast("Access Denied: You can only delete your own files.", "error");
+                                }
+                                setContextMenu(null);
+                            }}
+                            className={`w-full text-left px-4 py-2.5 text-sm flex items-center gap-2 ${isAdmin || contextMenu.node.owner_email === userEmail
+                                ? 'text-red-600 hover:bg-red-50'
+                                : 'text-slate-300 cursor-not-allowed'
+                                }`}
+                        >
+                            <Trash2 className="w-4 h-4" />
+                            Delete
+                        </button>
+                    )}
                 </div>
             )}
             {/* Version History Modal */}
@@ -1516,49 +1586,59 @@ export default function DrivePage() {
                             </div>
 
                             <div className="space-y-1 max-h-[400px] overflow-y-auto pr-1 custom-scrollbar">
-                                {versionNodes.map((v, idx) => (
-                                    <div key={v.id} className={`flex items-center justify-between p-4 rounded-xl border ${idx === 0 ? 'bg-blue-50/30 border-blue-100 ring-1 ring-blue-100' : 'border-slate-100 hover:bg-slate-50'} transition-all`}>
-                                        <div className="flex items-center gap-4">
-                                            <div className="flex flex-col items-center">
-                                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${idx === 0 ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-600'}`}>
-                                                    v{v.version}
-                                                </span>
-                                                {idx === 0 && <span className="text-[9px] text-blue-600 font-bold mt-1 uppercase">Active</span>}
+                                {versionNodes.map((v, idx) => {
+                                    const isPurged = !v.r2_key;
+                                    return (
+                                        <div key={v.id} className={`flex items-center justify-between p-4 rounded-xl border ${idx === 0 ? 'bg-blue-50/30 border-blue-100 ring-1 ring-blue-100' : 'border-slate-100 hover:bg-slate-50'} ${isPurged ? 'opacity-50 saturate-0' : ''} transition-all`}>
+                                            <div className="flex items-center gap-4">
+                                                <div className="flex flex-col items-center">
+                                                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${idx === 0 ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-600'}`}>
+                                                        v{v.version}
+                                                    </span>
+                                                    {idx === 0 && <span className="text-[9px] text-blue-600 font-bold mt-1 uppercase">Active</span>}
+                                                </div>
+                                                <div>
+                                                    <div className="flex items-center gap-2">
+                                                        <p className="text-sm font-semibold text-slate-800">
+                                                            {format(new Date(v.updated_at), 'MMM d, yyyy · HH:mm')}
+                                                        </p>
+                                                        {isPurged && <span className="text-[9px] bg-slate-100 text-slate-400 px-1.5 py-0.5 rounded border border-slate-200 font-bold uppercase tracking-tighter">Purged</span>}
+                                                    </div>
+                                                    <p className="text-xs text-slate-500 flex items-center gap-2">
+                                                        <span>{(v.size! / 1024).toFixed(1)} KB</span>
+                                                        <span className="w-1 h-1 bg-slate-300 rounded-full"></span>
+                                                        <span>{v.owner_email?.split('@')[0]}</span>
+                                                    </p>
+                                                </div>
                                             </div>
-                                            <div>
-                                                <p className="text-sm font-semibold text-slate-800">
-                                                    {format(new Date(v.updated_at), 'MMM d, yyyy · HH:mm')}
-                                                </p>
-                                                <p className="text-xs text-slate-500 flex items-center gap-2">
-                                                    <span>{(v.size! / 1024).toFixed(1)} KB</span>
-                                                    <span className="w-1 h-1 bg-slate-300 rounded-full"></span>
-                                                    <span>{v.owner_email?.split('@')[0]}</span>
-                                                </p>
-                                            </div>
-                                        </div>
 
-                                        <div className="flex items-center gap-2">
-                                            <button
-                                                onClick={() => window.open(`/api/files/${encodeURIComponent(v.r2_key!)}?filename=${encodeURIComponent(v.name)}`)}
-                                                className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
-                                                title="Download this version"
-                                            >
-                                                <Download className="w-4 h-4" />
-                                            </button>
-
-                                            {idx !== 0 && (
+                                            <div className="flex items-center gap-2">
                                                 <button
-                                                    onClick={() => handleRollback(v)}
-                                                    disabled={isRollingBack}
-                                                    className="px-3 py-1.5 text-xs font-bold text-slate-600 hover:text-blue-600 hover:bg-blue-50 border border-slate-200 hover:border-blue-200 rounded-lg transition-all flex items-center gap-1.5 disabled:opacity-50"
+                                                    onClick={() => !isPurged && window.open(`/api/files/${encodeURIComponent(v.r2_key!)}?filename=${encodeURIComponent(v.name)}`)}
+                                                    disabled={isPurged}
+                                                    className={`p-2 rounded-lg transition-all ${isPurged ? 'text-slate-300 cursor-not-allowed' : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'}`}
+                                                    title={isPurged ? "File content has been purged per project policy" : "Download this version"}
                                                 >
-                                                    <RotateCcw className="w-3.5 h-3.5" />
-                                                    Roll Back
+                                                    <Download className="w-4 h-4" />
                                                 </button>
-                                            )}
+
+                                                {idx !== 0 && (
+                                                    <button
+                                                        onClick={() => !isPurged && handleRollback(v)}
+                                                        disabled={isRollingBack || isPurged}
+                                                        className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${isPurged
+                                                            ? 'text-slate-300 border-slate-100 bg-slate-50 cursor-not-allowed'
+                                                            : 'text-slate-600 hover:text-blue-600 hover:bg-blue-50 border border-slate-200 hover:border-blue-200 disabled:opacity-50'
+                                                            }`}
+                                                    >
+                                                        <RotateCcw className="w-3.5 h-3.5" />
+                                                        Roll Back
+                                                    </button>
+                                                )}
+                                            </div>
                                         </div>
-                                    </div>
-                                ))}
+                                    );
+                                })}
                             </div>
 
                             <div className="mt-6 flex justify-end">
@@ -1635,6 +1715,163 @@ export default function DrivePage() {
                     </div>
                 </div>
             )}
+
+            {/* Project Settings Modal */}
+            {isProjectSettingsOpen && currentProject && (
+                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4 animate-in fade-in duration-200">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+                        <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+                            <div className="flex items-center gap-2">
+                                <Settings className="w-5 h-5 text-blue-600" />
+                                <h3 className="text-lg font-bold text-slate-900">Project Settings</h3>
+                            </div>
+                            <button onClick={() => setIsProjectSettingsOpen(false)} className="p-2 hover:bg-slate-200 rounded-full transition-colors">
+                                <X className="w-5 h-5 text-slate-400" />
+                            </button>
+                        </div>
+
+                        <div className="p-8">
+                            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-4">Advanced Notifications</h4>
+
+                            <div className="flex items-start justify-between gap-4 p-4 bg-blue-50/50 rounded-xl border border-blue-100 mb-8">
+                                <div className="flex-1">
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <Cloud className="w-4 h-4 text-blue-600" />
+                                        <span className="font-bold text-slate-800 text-sm">Activity Email Notifications</span>
+                                    </div>
+                                    <p className="text-xs text-slate-500 leading-relaxed">
+                                        Send email alerts to the Project Owner whenever members upload or delete files.
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={() => setProjectSettings(prev => ({ ...prev, notify_on_activity: !prev.notify_on_activity }))}
+                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${projectSettings.notify_on_activity ? 'bg-blue-600' : 'bg-slate-300'}`}
+                                >
+                                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${projectSettings.notify_on_activity ? 'translate-x-6' : 'translate-x-1'}`} />
+                                </button>
+                            </div>
+
+                            <div className="mb-8 p-4 bg-slate-50 rounded-xl border border-slate-200">
+                                <label className="block text-sm font-bold text-slate-700 mb-1 flex items-center gap-2">
+                                    <History className="w-4 h-4 text-slate-400" />
+                                    Version Retention Limit
+                                </label>
+                                <p className="text-[11px] text-slate-500 mb-3 leading-tight">
+                                    Maximum number of versions to keep per file. Older versions will be purged from storage (still visible in history but not downloadable).
+                                </p>
+                                <div className="flex items-center gap-3">
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        placeholder="0 = Unlimited"
+                                        value={projectSettings.version_retention_limit || ''}
+                                        onChange={(e) => setProjectSettings(prev => ({ ...prev, version_retention_limit: parseInt(e.target.value) || 0 }))}
+                                        className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm font-semibold"
+                                    />
+                                    <span className="text-xs text-slate-400 font-medium whitespace-nowrap">Versions</span>
+                                </div>
+                            </div>
+
+                            <div className="mb-6 flex items-center justify-between p-4 bg-amber-50 rounded-xl border border-amber-100">
+                                <div>
+                                    <label className="text-sm font-bold text-amber-900 flex items-center gap-2">
+                                        <Lock className="w-4 h-4" />
+                                        Read-Only Mode
+                                    </label>
+                                    <p className="text-[11px] text-amber-700 leading-tight mt-1">
+                                        Prevent all users (except Admins) from uploading, deleting, or modifying files in this project.
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={() => setProjectSettings(prev => ({ ...prev, read_only: !prev.read_only }))}
+                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${projectSettings.read_only ? 'bg-amber-600' : 'bg-slate-300'}`}
+                                >
+                                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${projectSettings.read_only ? 'translate-x-6' : 'translate-x-1'}`} />
+                                </button>
+                            </div>
+
+                            <div className="flex gap-3">
+                                <button
+                                    onClick={() => setIsProjectSettingsOpen(false)}
+                                    className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold rounded-xl transition-all"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    disabled={isSavingSettings}
+                                    onClick={async () => {
+                                        setIsSavingSettings(true);
+                                        try {
+                                            const res = await fetch('/api/projects/settings', {
+                                                method: 'PATCH',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({
+                                                    projectId: currentProject.id,
+                                                    settings: projectSettings
+                                                })
+                                            });
+                                            if (res.ok) {
+                                                showToast("Settings saved successfully", "success");
+                                                setCurrentProject(prev => prev ? { ...prev, settings: projectSettings } : null);
+                                                setIsProjectSettingsOpen(false);
+                                            } else {
+                                                throw new Error("Failed to save settings");
+                                            }
+                                        } catch (e) {
+                                            showToast("Failed to save settings", "error");
+                                        } finally {
+                                            setIsSavingSettings(false);
+                                        }
+                                    }}
+                                    className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-lg shadow-blue-200 transition-all flex items-center justify-center gap-2"
+                                >
+                                    {isSavingSettings ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save Changes"}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Delete Confirmation Overlay */}
+            {itemToDelete && (
+                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4 animate-in fade-in duration-200">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200">
+                        <div className="p-8 text-center">
+                            <div className="w-16 h-16 bg-red-50 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4 border-4 border-red-100/50">
+                                <Trash2 className="w-8 h-8" />
+                            </div>
+                            <h3 className="text-xl font-bold text-slate-900 mb-2">Delete {itemToDelete.type === 'FOLDER' ? 'Folder' : 'File'}?</h3>
+                            <p className="text-slate-500 text-sm leading-relaxed mb-6">
+                                Are you sure you want to delete <span className="font-bold text-slate-800">"{itemToDelete.name}"</span>?
+                                {itemToDelete.type === 'FOLDER' && (
+                                    <span className="block mt-2 font-semibold text-red-600 text-[11px] uppercase tracking-wider">
+                                        This will also delete ALL contents!
+                                    </span>
+                                )}
+                                <br />
+                                <span className="text-[10px] opacity-70 mt-2 block">This action cannot be undone.</span>
+                            </p>
+
+                            <div className="flex flex-col gap-2">
+                                <button
+                                    onClick={confirmDeleteExecute}
+                                    className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-xl transition-all shadow-lg shadow-red-200 flex items-center justify-center gap-2"
+                                >
+                                    Delete Permanently
+                                </button>
+                                <button
+                                    onClick={() => setItemToDelete(null)}
+                                    className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-3 rounded-xl transition-all"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Rollback Confirmation Overlay */}
             {pendingRollback && (
                 <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4 animate-in fade-in duration-200">
