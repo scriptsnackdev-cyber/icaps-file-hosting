@@ -15,9 +15,12 @@ interface TaskProgressProps {
     tasks: AsyncTask[];
     onClearCompleted: () => void;
     onStop?: () => void;
+    eta?: string;
+    speed?: string;
+    overallProgress?: number;
 }
 
-export function TaskProgress({ tasks, onClearCompleted, onStop }: TaskProgressProps) {
+export function TaskProgress({ tasks, onClearCompleted, onStop, eta, speed, overallProgress }: TaskProgressProps) {
     const [isExpanded, setIsExpanded] = useState(true);
     const [isVisible, setIsVisible] = useState(false);
 
@@ -68,12 +71,23 @@ export function TaskProgress({ tasks, onClearCompleted, onStop }: TaskProgressPr
 
     // Extended Stats for Header (Subtitle)
     const statsParts = [];
-    if (successCount > 0) statsParts.push(`${successCount} success`);
+    if (speed && !isAllDone) statsParts.push(`${speed}`);
+    if (eta && !isAllDone) statsParts.push(`ETA: ${eta}`);
+
+    if (successCount > 0 && isAllDone) statsParts.push(`${successCount} success`);
     if (skippedCount > 0) statsParts.push(`${skippedCount} skipped`);
     if (errorCount > 0) statsParts.push(`${errorCount} failed`);
     if (cancelledCount > 0) statsParts.push(`${cancelledCount} cancelled`);
 
-    const subtitle = statsParts.join(', ');
+    const subtitle = statsParts.join(' • ');
+
+    // Progress Value (0-100)
+    let progressValue = 0;
+    if (overallProgress !== undefined) {
+        progressValue = overallProgress;
+    } else {
+        progressValue = totalCount > 0 ? ((totalCount - pendingCount) / totalCount) * 100 : 0;
+    }
 
     return (
         <div className="fixed bottom-6 right-6 z-[60] w-[26rem] bg-white rounded-t-xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col font-sans animate-in slide-in-from-bottom-5 duration-300">
@@ -118,14 +132,14 @@ export function TaskProgress({ tasks, onClearCompleted, onStop }: TaskProgressPr
                 </div>
 
                 {/* Progress Bar & Subtitle */}
-                {(pendingCount > 0 || subtitle) && (
+                {((pendingCount > 0) || subtitle) && (
                     <div className="mt-2 w-full">
                         {/* Only show bar if pending tasks exist to show progress moving */}
                         {!isAllDone && (
                             <div className="w-full bg-slate-700 rounded-full h-1.5 mb-1.5 overflow-hidden">
                                 <div
                                     className="bg-blue-500 h-1.5 rounded-full transition-all duration-300 ease-out"
-                                    style={{ width: `${((totalCount - pendingCount) / totalCount) * 100}%` }}
+                                    style={{ width: `${progressValue}%` }}
                                 ></div>
                             </div>
                         )}
@@ -137,7 +151,7 @@ export function TaskProgress({ tasks, onClearCompleted, onStop }: TaskProgressPr
             {/* List */}
             <div className={`transition-all duration-300 ease-in-out bg-slate-50 ${isExpanded ? 'max-h-80 opacity-100 overflow-y-auto' : 'max-h-0 opacity-0 overflow-hidden'}`}>
                 <div className="flex flex-col">
-                    {tasks.map((task) => (
+                    {tasks.slice(0, 100).map((task) => (
                         <div key={task.id} className="flex items-center gap-3 px-4 py-3 border-b border-slate-100 bg-white last:border-0 hover:bg-slate-50 transition-colors">
                             {/* Icon */}
                             <div className="shrink-0 text-slate-400">

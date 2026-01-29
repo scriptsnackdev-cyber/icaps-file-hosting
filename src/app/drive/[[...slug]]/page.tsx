@@ -6,7 +6,7 @@ import {
     Cloud, Search, Plus, Loader2, FolderPlus, FileUp, Home as HomeIcon,
     ChevronRight, Copy, Share2, Download, Trash2, FileText, Folder,
     Settings, MoreVertical, Upload, FolderUp, Lock, Globe, Users, X, Check,
-    AlertCircle, ArrowUpCircle, RotateCcw, History
+    AlertCircle, ArrowUpCircle, RotateCcw, History, Pencil
 } from 'lucide-react';
 import { StorageNode, Project } from '@/types';
 import { createClient } from '@/utils/supabase/client';
@@ -129,6 +129,10 @@ export default function DrivePage() {
     const [isSavingShare, setIsSavingShare] = useState(false);
     const [shareNodeId, setShareNodeId] = useState<string | null>(null);
     const [contextMenu, setContextMenu] = useState<{ x: number, y: number, node: StorageNode } | null>(null);
+    const [isRenameModalOpen, setIsRenameModalOpen] = useState(false);
+    const [nodeToRename, setNodeToRename] = useState<StorageNode | null>(null);
+    const [renameValue, setRenameValue] = useState("");
+    const [isRenaming, setIsRenaming] = useState(false);
 
     const [isDownloading, setIsDownloading] = useState(false);
 
@@ -456,8 +460,57 @@ export default function DrivePage() {
     const abortControllerRef = useRef<AbortController | null>(null);
     const isUploadingRef = useRef(false);
 
+
+    // Upload Stats
+    const [uploadStats, setUploadStats] = useState<{ eta?: string, speed?: string, progress?: number }>({});
+    const filesProgressRef = useRef<Map<string, number>>(new Map());
+    const batchStatsRef = useRef<{ startTime: number, totalBytes: number }>({ startTime: 0, totalBytes: 0 });
+    const lastProgressUpdateRef = useRef<number>(0);
+
+    const updateGlobalProgress = useCallback(() => {
+        const now = Date.now();
+        if (now - lastProgressUpdateRef.current < 200) return; // Throttle 200ms for smoother feel
+        lastProgressUpdateRef.current = now;
+
+        const totalUploaded = Array.from(filesProgressRef.current.values()).reduce((a, b) => a + b, 0);
+        const { startTime, totalBytes } = batchStatsRef.current;
+
+        if (totalBytes === 0 || startTime === 0) return;
+
+        // Progress
+        const progress = Math.min(100, (totalUploaded / totalBytes) * 100);
+
+        // Speed
+        const elapsedSeconds = (now - startTime) / 1000;
+        const bytesPerSec = elapsedSeconds > 0 ? totalUploaded / elapsedSeconds : 0;
+
+        // Formatted Speed
+        const formatSpeed = (bps: number) => {
+            if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
+            return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
+        };
+
+        // ETA
+        const remainingBytes = totalBytes - totalUploaded;
+        const secondsRemaining = bytesPerSec > 0 ? remainingBytes / bytesPerSec : 0;
+
+        const formatTime = (sec: number) => {
+            if (!isFinite(sec) || sec < 0) return '--';
+            if (sec < 60) return `${Math.ceil(sec)}s`;
+            const min = Math.floor(sec / 60);
+            if (min < 60) return `${min}m ${Math.ceil(sec % 60)}s`;
+            return `${Math.floor(min / 60)}h ${min % 60}m`;
+        };
+
+        setUploadStats({
+            progress,
+            speed: formatSpeed(bytesPerSec),
+            eta: formatTime(secondsRemaining)
+        });
+    }, []);
+
     // Generic Upload Logic
-    const uploadFileToId = async (file: File, parentId: string | null, existingTaskId?: string, resolution?: 'update' | 'overwrite', silent?: boolean) => {
+    const uploadFileToId = async (file: File, parentId: string | null, existingTaskId?: string, resolution?: 'update' | 'overwrite', silent?: boolean): Promise<'SUCCESS' | 'CONFLICT' | 'ERROR' | 'CANCELLED'> => {
         const cleanName = file.name.split('/').pop()?.split('\\').pop() || file.name;
         const taskId = existingTaskId || addTask('UPLOAD', cleanName);
 
@@ -468,46 +521,88 @@ export default function DrivePage() {
         if (resolution) formData.append('resolution', resolution);
         if (silent) formData.append('silent', 'true');
 
-        try {
-            const signal = abortControllerRef.current?.signal;
-            const res = await fetch('/api/drive/upload', {
-                method: 'POST',
-                body: formData,
-                signal
-            });
+        return new Promise((resolve) => {
+            const xhr = new XMLHttpRequest();
 
-            if (res.status === 409) {
-                // Conflict detected
-                const data = await res.json();
-                setConflictInfo({ file, parentId, taskId, data: data.existing });
-                return;
+            // Link AbortController
+            if (abortControllerRef.current) {
+                abortControllerRef.current.signal.addEventListener('abort', () => {
+                    xhr.abort();
+                });
             }
 
-            if (!res.ok) {
-                const errorText = await res.text();
-                console.error("Upload failed details:", errorText);
-                throw new Error(res.statusText || 'Upload failed');
-            }
+            xhr.open('POST', '/api/drive/upload', true);
 
-            updateTask(taskId, 'SUCCESS');
-            fetchNodes(true); // Refresh immediately after success
-            refreshStorage(); // Update quota
-        } catch (err: any) {
-            if (err.name === 'AbortError' || (abortControllerRef.current?.signal.aborted)) {
-                updateTask(taskId, 'CANCELLED');
-            } else {
-                console.error("Upload Error:", err);
-                // Show toast only if it's a single file upload to avoid spamming, or use specific error logic
-                // For now, let's update task status. TaskProgress shows the error icon.
+            xhr.upload.onprogress = (event) => {
+                if (event.lengthComputable) {
+                    filesProgressRef.current.set(taskId, event.loaded);
+                    updateGlobalProgress();
+                }
+            };
+
+            xhr.onload = async () => {
+                if (xhr.status === 409) {
+                    let data = {};
+                    try { data = JSON.parse(xhr.responseText); } catch (e) { }
+                    // Mark progress as 0 for conflict so it doesn't count as "uploaded" in byte stats if we wish, or keep it.
+                    // Let's keep it as is, or maybe remove from map? 
+                    // To handle "retry", we keep it.
+                    setConflictInfo({ file, parentId, taskId, data: (data as any).existing });
+                    resolve('CONFLICT');
+                } else if (xhr.status >= 200 && xhr.status < 300) {
+                    // Ensure 100% is recorded
+                    filesProgressRef.current.set(taskId, file.size);
+                    updateGlobalProgress();
+
+                    updateTask(taskId, 'SUCCESS');
+                    if (!silent) {
+                        fetchNodes(true);
+                        refreshStorage();
+                    }
+                    resolve('SUCCESS');
+                } else {
+                    updateTask(taskId, 'ERROR');
+                    resolve('ERROR');
+                }
+            };
+
+            xhr.onerror = () => {
                 updateTask(taskId, 'ERROR');
-            }
-        }
+                resolve('ERROR');
+            };
+
+            xhr.onabort = () => {
+                updateTask(taskId, 'CANCELLED');
+                resolve('CANCELLED');
+            };
+
+            xhr.send(formData);
+        });
     };
 
     const uploadFile = async (file: File) => {
-        // Wrapper for current folder
-        await uploadFileToId(file, currentFolderId);
+        batchStatsRef.current = { startTime: Date.now(), totalBytes: file.size };
+        filesProgressRef.current.clear();
+        setUploadStats({}); // Reset UI
+
+        let retries = 3;
+        while (retries > 0) {
+            try {
+                const result = await uploadFileToId(file, currentFolderId);
+                if (result === 'SUCCESS' || result === 'CONFLICT' || result === 'CANCELLED') break;
+                // If ERROR, we retry
+                throw new Error("Upload failed");
+            } catch (e) {
+                retries--;
+                if (retries === 0) {
+                    showToast("Failed to upload file after 3 attempts.", "error");
+                } else {
+                    await new Promise(r => setTimeout(r, 1000 * (4 - retries))); // 1s, 2s...
+                }
+            }
+        }
     }
+
 
     const getOrCreateFolder = async (name: string, parentId: string | null, silent?: boolean): Promise<string> => {
         const res = await fetch('/api/drive', {
@@ -562,9 +657,15 @@ export default function DrivePage() {
 
         const files = pendingFolderUpload;
 
-        // 0. Initialize Cancellation
+        // 0. Initialize Cancellation & Stats
         abortControllerRef.current = new AbortController();
         isUploadingRef.current = true;
+
+        // Initialize Stats
+        const totalBatchBytes = files.reduce((acc, f) => acc + f.size, 0);
+        batchStatsRef.current = { startTime: Date.now(), totalBytes: totalBatchBytes };
+        filesProgressRef.current.clear();
+        setUploadStats({});
 
         showToast(`Starting upload of ${files.length} items from folder...`, 'info');
 
@@ -609,36 +710,117 @@ export default function DrivePage() {
         const sortedFolders = Array.from(neededFolders).sort((a, b) => a.split('/').length - b.split('/').length);
 
         try {
-            for (const folderPath of sortedFolders) {
-                if (!isUploadingRef.current) break; // STOP CHECK
+            try {
+                for (const folderPath of sortedFolders) {
+                    if (!isUploadingRef.current) break; // STOP CHECK
 
-                const parts = folderPath.split('/');
-                const folderName = parts[parts.length - 1];
-                const parentPath = parts.slice(0, -1).join('/');
+                    const parts = folderPath.split('/');
+                    const folderName = parts[parts.length - 1];
+                    const parentPath = parts.slice(0, -1).join('/');
 
-                let realParentId: string | null = null;
-                if (parentPath === "") {
-                    realParentId = currentFolderId;
-                } else {
-                    realParentId = folderIdMap.get(parentPath) || currentFolderId;
+                    let realParentId: string | null = null;
+                    if (parentPath === "") {
+                        realParentId = currentFolderId;
+                    } else {
+                        // CRITICAL FIX: Do NOT fallback to currentFolderId if parent is missing.
+                        // If 'A/B' exists but we are processing 'A/B/C', we need ID of 'A/B'.
+                        // If it's missing (creation failed), we should probably skip this folder to avoid chaos.
+                        const foundId = folderIdMap.get(parentPath);
+                        if (!foundId) {
+                            console.warn(`Skipping folder ${folderPath} because parent ${parentPath} failed to create.`);
+                            continue;
+                        }
+                        realParentId = foundId;
+                    }
+
+                    // Loop Retry Logic for folder creation
+                    let retries = 3;
+                    let folderId = "";
+                    while (retries > 0) {
+                        try {
+                            folderId = await getOrCreateFolder(folderName, realParentId, true);
+                            break;
+                        } catch (e) {
+                            retries--;
+                            if (retries === 0) console.error(`Failed to create folder ${folderName} after 3 attempts`);
+                            await new Promise(r => setTimeout(r, 500));
+                        }
+                    }
+
+                    if (folderId) {
+                        folderIdMap.set(folderPath, folderId);
+                    }
                 }
-
-                const folderId = await getOrCreateFolder(folderName, realParentId, true);
-                folderIdMap.set(folderPath, folderId);
+            } catch (folderErr) {
+                console.error("Folder creation interrupted", folderErr);
             }
 
-            // 3. Upload all files sequentially
+            // 3. Upload files with Concurrency Pool
+            const CONCURRENCY_LIMIT = 5;
+            const pool: Promise<void>[] = [];
+
             for (let i = 0; i < files.length; i++) {
-                if (!isUploadingRef.current) break; // STOP CHECK
+                if (!isUploadingRef.current) break;
 
                 const file = files[i];
                 const pathParts = file.webkitRelativePath.split('/');
-                pathParts.pop(); // remove file name
+                pathParts.pop();
                 const folderPath = pathParts.join('/');
 
                 const parentId = folderIdMap.get(folderPath) || currentFolderId;
-                await uploadFileToId(file, parentId, fileTaskIds[i], undefined, true);
+
+                // Create a promise for this upload
+                const task = async () => {
+                    let retries = 3;
+                    const backoffStart = 1000;
+
+                    while (retries > 0) {
+                        if (!isUploadingRef.current) break; // Stop if cancelled
+
+                        // Reset status to PENDING if retrying (visual feedback not necessary but good logic)
+                        // updateTask(fileTaskIds[i], 'PENDING'); 
+
+                        try {
+                            const status = await uploadFileToId(file, parentId, fileTaskIds[i], undefined, true);
+                            if (status === 'SUCCESS' || status === 'CONFLICT' || status === 'CANCELLED') {
+                                break; // Done (or conflict/cancelled means we stop retrying)
+                            }
+                            // If ERROR, continue to retry
+                        } catch (e) {
+                            // uploadFileToId swallows errors so this catch block might not be hit, 
+                            // but good for safety.
+                        }
+
+                        retries--;
+                        if (retries > 0 && isUploadingRef.current) {
+                            // Exponential Backoff: 1s, 2s, 4s
+                            const waitTime = backoffStart * Math.pow(2, 3 - retries - 1);
+                            await new Promise(r => setTimeout(r, waitTime));
+                        }
+                    }
+                };
+
+                // Add to pool
+                const p = task().then(() => {
+                    // Remove self from pool when done
+                    const matchIdx = pool.indexOf(p);
+                    if (matchIdx !== -1) pool.splice(matchIdx, 1);
+                });
+                pool.push(p);
+
+                // Update storage quota periodically (every 20 items) so user sees progress
+                if (i % 20 === 0) {
+                    refreshStorage();
+                }
+
+                // If pool is full, wait for at least one to finish
+                if (pool.length >= CONCURRENCY_LIMIT) {
+                    await Promise.race(pool);
+                }
             }
+
+            // Wait for remaining
+            await Promise.all(pool);
 
             // --- SEND SINGLE FOLDER NOTIFICATION ---
             if (isUploadingRef.current && files.length > 0 && currentProject) {
@@ -804,6 +986,45 @@ export default function DrivePage() {
             showToast("Failed to fetch share settings", "error");
         }
     };
+
+    const handleRenameSubmit = async () => {
+        if (!nodeToRename || !renameValue.trim()) return;
+        setIsRenaming(true);
+
+        try {
+            const res = await fetch('/api/drive', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: nodeToRename.id,
+                    name: renameValue.trim()
+                })
+            });
+
+            if (!res.ok) {
+                const err = await res.json();
+                throw new Error(err.error || "Failed to rename");
+            }
+
+            showToast("Renamed successfully", "success");
+            setIsRenameModalOpen(false);
+            fetchNodes(true); // Refresh list
+        } catch (e: any) {
+            console.error(e);
+            showToast(e.message || "Failed to rename", "error");
+        } finally {
+            setIsRenaming(false);
+        }
+    };
+
+    // Auto focus rename input
+    const renameInputRef = useRef<HTMLInputElement>(null);
+    useEffect(() => {
+        if (isRenameModalOpen && renameInputRef.current) {
+            renameInputRef.current.focus();
+            renameInputRef.current.select();
+        }
+    }, [isRenameModalOpen]);
 
     const handleSaveShare = async () => {
         if (!shareNodeId) return;
@@ -1385,6 +1606,46 @@ export default function DrivePage() {
                 </div>
             )}
 
+            {isRenameModalOpen && (
+                <div className="fixed inset-0 bg-slate-900/60 z-[100] flex items-center justify-center backdrop-blur-sm animate-in fade-in duration-200">
+                    <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl scale-100 animate-in zoom-in-95 duration-200 transform">
+                        <div className="mb-6">
+                            <h3 className="text-xl font-bold text-slate-800 mb-4">Rename Item</h3>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700 mb-1">Name</label>
+                                <input
+                                    ref={renameInputRef}
+                                    type="text"
+                                    value={renameValue}
+                                    onChange={e => setRenameValue(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') handleRenameSubmit();
+                                        if (e.key === 'Escape') setIsRenameModalOpen(false);
+                                    }}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                />
+                            </div>
+                        </div>
+                        <div className="flex gap-3 justify-end">
+                            <button
+                                onClick={() => setIsRenameModalOpen(false)}
+                                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleRenameSubmit}
+                                disabled={isRenaming}
+                                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium shadow-md transition-all disabled:opacity-70 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                {isRenaming && <Loader2 className="w-4 h-4 animate-spin" />}
+                                Rename
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Share Modal */}
             {isShareModalOpen && (
                 <div className="fixed inset-0 bg-slate-900/60 z-[100] flex items-center justify-center backdrop-blur-sm animate-in fade-in duration-200">
@@ -1510,7 +1771,10 @@ export default function DrivePage() {
             <TaskProgress
                 tasks={tasks}
                 onClearCompleted={clearCompletedTasks}
-                onStop={handleStopUpload}
+                onStop={isUploadingRef.current ? handleStopUpload : undefined}
+                eta={uploadStats.eta}
+                speed={uploadStats.speed}
+                overallProgress={uploadStats.progress}
             />
 
             {/* Context Menu */}
@@ -1532,6 +1796,21 @@ export default function DrivePage() {
                             Download
                         </button>
                     )}
+
+                    {isAdmin || (contextMenu.node.owner_email === userEmail) ? (
+                        <button
+                            onClick={() => {
+                                setNodeToRename(contextMenu.node);
+                                setRenameValue(contextMenu.node.name);
+                                setIsRenameModalOpen(true);
+                                setContextMenu(null);
+                            }}
+                            className="w-full text-left px-4 py-2.5 hover:bg-slate-50 text-sm text-slate-700 flex items-center gap-2"
+                        >
+                            <Pencil className="w-4 h-4 text-slate-500" />
+                            Rename
+                        </button>
+                    ) : null}
 
                     <button
                         onClick={() => {

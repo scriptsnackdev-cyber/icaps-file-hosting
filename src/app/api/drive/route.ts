@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/utils/supabase/server';
-import { DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET_NAME } from '@/lib/r2';
 import { sendActivityNotification } from '@/lib/resend';
 
@@ -93,6 +93,9 @@ export async function GET(request: NextRequest) {
         } else {
             childrenQuery = childrenQuery.is('parent_id', null);
         }
+
+        // Filter out soft-deleted items
+        childrenQuery = childrenQuery.neq('status', 'DELETED_PENDING');
 
         const { data: nodes, error: childrenError } = await childrenQuery;
         if (childrenError) throw childrenError;
@@ -362,85 +365,62 @@ export async function DELETE(request: NextRequest) {
         const targetProjectId = targetNode.project_id;
 
         if (targetNode.type === 'FILE') {
-            if (isAdmin) {
-                // Admin deletes ALL versions
-                let query = supabase.from('storage_nodes')
-                    .select('*')
-                    .eq('project_id', targetNode.project_id)
-                    .eq('name', targetNode.name)
-                    .eq('type', 'FILE');
-
-                if (targetNode.parent_id) {
-                    query = query.eq('parent_id', targetNode.parent_id);
-                } else {
-                    query = query.is('parent_id', null);
-                }
-
-                const { data: allVersions } = await query;
-
-                if (allVersions) {
-                    for (const v of allVersions) {
-                        totalDeletedSize += (v.size || 0);
-                        if (v.r2_key) {
-                            try {
-                                await r2.send(new DeleteObjectCommand({
-                                    Bucket: R2_BUCKET_NAME,
-                                    Key: v.r2_key,
-                                }));
-                            } catch (e) {
-                                console.error(`Failed to delete R2 object ${v.r2_key}`, e);
-                            }
-                        }
-                        await supabase.from('storage_nodes').delete().eq('id', v.id);
-                    }
-                }
-            } else {
-                // Regular Owner deletes only THIS version
-                totalDeletedSize = targetNode.size || 0;
-                if (targetNode.r2_key) {
-                    await r2.send(new DeleteObjectCommand({
-                        Bucket: R2_BUCKET_NAME,
-                        Key: targetNode.r2_key,
-                    }));
-                }
-                const { error: delError } = await supabase.from('storage_nodes').delete().eq('id', id);
-                if (delError) throw delError;
+            const isOwner = targetNode.created_by === user.id || targetNode.owner_email === user.email;
+            if (!isAdmin && !isOwner) { // Double check logic
+                // Already checked above, but safe to keep structure or simplify
             }
-        } else {
-            // Folder recursion
-            await deleteNodeRecursively(id);
         }
 
-        // Update Project Quota
-        if (totalDeletedSize > 0 && resolvedProjectId) {
-            await supabase.rpc('update_project_storage', {
-                project_id: resolvedProjectId,
-                size_delta: -totalDeletedSize
-            });
-        }
+        // --- SOFT DELETE ---
+        // 1. Mark as DELETED_PENDING immediately so it disappears from UI
+        const { error: updateError } = await supabase
+            .from('storage_nodes')
+            .update({ status: 'DELETED_PENDING' })
+            .eq('id', id);
 
-        // --- EMAIL NOTIFICATION ---
+        if (updateError) throw updateError;
+
+        // 2. Fire and Forget: Invoke Background Edge Function to clean up R2 and DB rows
+        // We don't await this to ensure UI returns immediately
+        const functionUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/delete-nodes`;
+
+        fetch(functionUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`
+            },
+            body: JSON.stringify({
+                nodeId: id,
+                projectId: targetNode.project_id,
+                userEmail: user.email,
+                isAdmin: isAdmin
+            })
+        }).catch(err => console.error("Failed to trigger background delete:", err));
+
+        // --- EMAIL NOTIFICATION (Optional: maybe move to Edge Function if slow, but keeping here is fine for now as it's just one email) ---
         try {
             if (resolvedProjectId) {
                 const { data: project } = await supabase.from('projects').select('name, created_by, settings').eq('id', resolvedProjectId).single();
                 if (project && project.created_by !== user.id && project.settings?.notify_on_activity) {
-                    // Find root folder owner email
                     const { data: rootFolder } = await supabase.from('storage_nodes').select('owner_email').eq('project_id', resolvedProjectId).is('parent_id', null).limit(1).single();
                     if (rootFolder?.owner_email) {
-                        await sendActivityNotification({
+                        // We do this async without await to return faster
+                        sendActivityNotification({
                             to: rootFolder.owner_email,
                             projectName: project.name,
                             userName: user.email || 'Unknown User',
                             action: 'DELETED',
                             fileName: targetNode.name,
                             timestamp: new Date().toLocaleString()
-                        });
+                        }).catch(e => console.error("Email send failed", e));
                     }
                 }
             }
-        } catch (e) { console.error("Notification failed", e); }
+        } catch (e) { console.error("Notification setup failed", e); }
 
-        return NextResponse.json({ success: true, deletedSize: totalDeletedSize });
+        // Return success immediately (size will be reclaimed eventually)
+        return NextResponse.json({ success: true, message: 'Deletion scheduled in background', deletedSize: 0 });
 
     } catch (error: any) {
         console.error("Delete Error:", error);
@@ -458,7 +438,7 @@ export async function PATCH(request: NextRequest) {
 
     try {
         const body = await request.json();
-        const { id, sharing_scope, share_password, parentId } = body;
+        const { id, sharing_scope, share_password, parentId, name } = body;
 
         if (!id) {
             return NextResponse.json({ error: 'Node ID is required' }, { status: 400 });
@@ -501,6 +481,35 @@ export async function PATCH(request: NextRequest) {
         if (parentId !== undefined) updates.parent_id = parentId; // Support for Moving
         // Allow setting password to null (empty string/null)
         if (share_password !== undefined) updates.share_password = share_password;
+
+        if (name && name !== node.name) {
+            updates.name = name;
+
+            // Rename in R2 if it's a file
+            if (node.type === 'FILE' && node.r2_key && node.r2_key.endsWith(node.name)) {
+                const oldKey = node.r2_key;
+                const newKey = oldKey.slice(0, -node.name.length) + name;
+
+                try {
+                    await r2.send(new CopyObjectCommand({
+                        Bucket: R2_BUCKET_NAME,
+                        CopySource: `${R2_BUCKET_NAME}/${oldKey.split('/').map(encodeURIComponent).join('/')}`,
+                        Key: newKey
+                    }));
+
+                    await r2.send(new DeleteObjectCommand({
+                        Bucket: R2_BUCKET_NAME,
+                        Key: oldKey
+                    }));
+
+                    updates.r2_key = newKey;
+                } catch (e: any) {
+                    console.error("R2 Rename Error:", e);
+                    // If R2 fails, we probably shouldn't rename in DB to keep consistency
+                    return NextResponse.json({ error: 'Failed to update Cloud storage: ' + e.message }, { status: 500 });
+                }
+            }
+        }
 
         updates.updated_at = new Date().toISOString();
 

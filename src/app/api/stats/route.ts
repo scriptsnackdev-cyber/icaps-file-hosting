@@ -13,7 +13,9 @@ export async function GET(request: NextRequest) {
         const { data, error } = await supabase
             .from('storage_nodes')
             .select('size')
-            .eq('type', 'FILE');
+            .eq('type', 'FILE')
+            .neq('status', 'DELETED_PENDING'); // Ignore soft-deleted
+
 
         if (error) throw error;
 
