@@ -868,70 +868,121 @@ export default function DrivePage() {
         const cleanName = file.name.split('/').pop()?.split('\\').pop() || file.name;
         const taskId = existingTaskId || addTask('UPLOAD', cleanName);
 
-        const formData = new FormData();
-        formData.append('file', file, cleanName);
-        if (parentId) formData.append('parentId', parentId);
-        if (currentProject) formData.append('projectId', currentProject.id);
-        if (resolution) formData.append('resolution', resolution);
-        if (silent) formData.append('silent', 'true');
+        try {
+            // STEP 1: INITIALIZE (Get Presigned URL)
+            const initRes = await fetch('/api/drive/upload/init', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    filename: cleanName,
+                    fileSize: file.size,
+                    fileType: file.type,
+                    parentId,
+                    projectId: currentProject?.id,
+                    resolution,
+                    silent
+                })
+            });
 
-        return new Promise((resolve) => {
-            const xhr = new XMLHttpRequest();
-
-            // Link AbortController
-            if (abortControllerRef.current) {
-                abortControllerRef.current.signal.addEventListener('abort', () => {
-                    xhr.abort();
-                });
+            if (initRes.status === 409) {
+                const data = await initRes.json();
+                setConflictInfo({ file, parentId, taskId, data: (data as any).existing });
+                return 'CONFLICT';
             }
 
-            xhr.open('POST', '/api/drive/upload', true);
+            if (!initRes.ok) {
+                const err = await initRes.json();
+                showToast(err.error || 'Upload initialization failed', 'error');
+                updateTask(taskId, 'ERROR');
+                return 'ERROR';
+            }
 
-            xhr.upload.onprogress = (event) => {
-                if (event.lengthComputable) {
-                    filesProgressRef.current.set(taskId, event.loaded);
-                    updateGlobalProgress();
+            const initData = await initRes.json();
+            const { url, key, resolvedProjectId } = initData;
+
+            // STEP 2: UPLOAD DIRECTLY TO R2
+            return new Promise((resolve) => {
+                const xhr = new XMLHttpRequest();
+
+                if (abortControllerRef.current) {
+                    abortControllerRef.current.signal.addEventListener('abort', () => {
+                        xhr.abort();
+                    });
                 }
-            };
 
-            xhr.onload = async () => {
-                if (xhr.status === 409) {
-                    let data = {};
-                    try { data = JSON.parse(xhr.responseText); } catch (e) { }
-                    // Mark progress as 0 for conflict so it doesn't count as "uploaded" in byte stats if we wish, or keep it.
-                    // Let's keep it as is, or maybe remove from map? 
-                    // To handle "retry", we keep it.
-                    setConflictInfo({ file, parentId, taskId, data: (data as any).existing });
-                    resolve('CONFLICT');
-                } else if (xhr.status >= 200 && xhr.status < 300) {
-                    // Ensure 100% is recorded
-                    filesProgressRef.current.set(taskId, file.size);
-                    updateGlobalProgress();
+                xhr.open('PUT', url, true);
+                if (file.type) xhr.setRequestHeader('Content-Type', file.type);
 
-                    updateTask(taskId, 'SUCCESS');
-                    if (!silent) {
-                        fetchNodes(true);
-                        refreshStorage();
+                xhr.upload.onprogress = (event) => {
+                    if (event.lengthComputable) {
+                        filesProgressRef.current.set(taskId, event.loaded);
+                        updateGlobalProgress();
                     }
-                    resolve('SUCCESS');
-                } else {
+                };
+
+                xhr.onload = async () => {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        // STEP 3: COMPLETE (Finalize DB)
+                        try {
+                            const completeRes = await fetch('/api/drive/upload/complete', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    key,
+                                    filename: cleanName,
+                                    size: file.size,
+                                    type: file.type,
+                                    projectId: resolvedProjectId,
+                                    parentId,
+                                    resolution,
+                                    silent
+                                })
+                            });
+
+                            if (completeRes.ok) {
+                                filesProgressRef.current.set(taskId, file.size);
+                                updateGlobalProgress();
+                                updateTask(taskId, 'SUCCESS');
+                                if (!silent) {
+                                    fetchNodes(true);
+                                    refreshStorage();
+                                }
+                                resolve('SUCCESS');
+                            } else {
+                                const err = await completeRes.json();
+                                console.error('Completion error:', err);
+                                updateTask(taskId, 'ERROR');
+                                resolve('ERROR');
+                            }
+                        } catch (e) {
+                            console.error('Completion fetch error:', e);
+                            updateTask(taskId, 'ERROR');
+                            resolve('ERROR');
+                        }
+                    } else {
+                        updateTask(taskId, 'ERROR');
+                        resolve('ERROR');
+                    }
+                };
+
+                xhr.onerror = () => {
                     updateTask(taskId, 'ERROR');
                     resolve('ERROR');
-                }
-            };
+                };
 
-            xhr.onerror = () => {
-                updateTask(taskId, 'ERROR');
-                resolve('ERROR');
-            };
+                xhr.onabort = () => {
+                    updateTask(taskId, 'CANCELLED');
+                    resolve('CANCELLED');
+                };
 
-            xhr.onabort = () => {
-                updateTask(taskId, 'CANCELLED');
-                resolve('CANCELLED');
-            };
+                xhr.send(file);
+            });
 
-            xhr.send(formData);
-        });
+        } catch (e) {
+            console.error(e);
+            updateTask(taskId, 'ERROR');
+            return 'ERROR';
+        }
     };
 
     const uploadFile = async (file: File) => {

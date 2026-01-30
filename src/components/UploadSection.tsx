@@ -22,37 +22,71 @@ export const UploadSection: React.FC<UploadSectionProps> = ({ onUploadComplete }
     });
     const fileInputRef = useRef<HTMLInputElement>(null);
 
-    const uploadFile = (file: File) => {
+    const uploadFile = async (file: File) => {
         setStatus({ isUploading: true, progress: 0, fileName: file.name, error: null });
 
-        const xhr = new XMLHttpRequest();
-        // Use Next.js API route
-        xhr.open('PUT', `/api/files/${encodeURIComponent(file.name)}`);
+        try {
+            // 1. Get Presigned URL
+            const res = await fetch('/api/files/upload', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    filename: file.name,
+                    contentType: file.type
+                })
+            });
 
-        xhr.upload.onprogress = (event) => {
-            if (event.lengthComputable) {
-                const percent = (event.loaded / event.total) * 100;
-                setStatus(prev => ({ ...prev, progress: Math.round(percent) }));
+            if (!res.ok) {
+                const err = await res.json();
+                throw new Error(err.error || 'Failed to get upload URL');
             }
-        };
 
-        xhr.onload = () => {
-            if (xhr.status >= 200 && xhr.status < 300) {
-                setStatus(prev => ({ ...prev, isUploading: false, progress: 100 }));
-                setTimeout(() => {
-                    setStatus({ isUploading: false, progress: 0, fileName: null, error: null });
-                    onUploadComplete();
-                }, 1500);
-            } else {
-                setStatus(prev => ({ ...prev, isUploading: false, error: `Upload failed: ${xhr.statusText}` }));
-            }
-        };
+            const { url } = await res.json();
 
-        xhr.onerror = () => {
-            setStatus(prev => ({ ...prev, isUploading: false, error: 'Network error occurred during upload' }));
-        };
+            // 2. Upload to R2 directly
+            const xhr = new XMLHttpRequest();
+            xhr.open('PUT', url);
+            xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
 
-        xhr.send(file);
+            xhr.upload.onprogress = (event) => {
+                if (event.lengthComputable) {
+                    const percent = (event.loaded / event.total) * 100;
+                    setStatus(prev => ({ ...prev, progress: Math.round(percent) }));
+                }
+            };
+
+            xhr.onload = async () => {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    // 3. Log Success
+                    try {
+                        await fetch('/api/files/log-upload', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ filename: file.name })
+                        });
+                    } catch (logError) {
+                        console.error('Failed to log upload:', logError);
+                    }
+
+                    setStatus(prev => ({ ...prev, isUploading: false, progress: 100 }));
+                    setTimeout(() => {
+                        setStatus({ isUploading: false, progress: 0, fileName: null, error: null });
+                        onUploadComplete();
+                    }, 1500);
+                } else {
+                    setStatus(prev => ({ ...prev, isUploading: false, error: `Upload failed: ${xhr.statusText}` }));
+                }
+            };
+
+            xhr.onerror = () => {
+                setStatus(prev => ({ ...prev, isUploading: false, error: 'Network error occurred during upload' }));
+            };
+
+            xhr.send(file);
+
+        } catch (error: any) {
+            setStatus(prev => ({ ...prev, isUploading: false, error: error.message }));
+        }
     };
 
     const handleFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
