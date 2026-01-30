@@ -22,24 +22,46 @@ export function Sidebar() {
     const { totalSize } = useStorage();
     const { isAdmin, userEmail, signOut } = useAuth();
     const [projects, setProjects] = useState<any[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [isSignOutModalOpen, setIsSignOutModalOpen] = useState(false);
 
     useEffect(() => {
-        const fetchProjects = async () => {
+        const loadProjects = async () => {
+            // Try to load from cache first
+            if (typeof window !== 'undefined') {
+                const cached = localStorage.getItem('sidebar_projects');
+                if (cached) {
+                    try {
+                        const parsed = JSON.parse(cached);
+                        setProjects(parsed);
+                        if (parsed.length > 0) setIsLoading(false);
+                    } catch (e) {
+                        console.error("Failed to parse cached projects", e);
+                    }
+                }
+            }
+
             try {
                 const res = await fetch('/api/projects');
                 if (res.ok) {
                     const data = await res.json();
                     setProjects(data);
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('sidebar_projects', JSON.stringify(data));
+                    }
                 }
             } catch (err) {
                 console.error("Failed to fetch projects for sidebar", err);
+            } finally {
+                setIsLoading(false);
             }
         };
-        fetchProjects();
+        loadProjects();
     }, []);
 
     const navItems = [
         { icon: FolderOpen, label: 'My Files', path: '/drive' },
+        { icon: Trash2, label: 'Trash', path: '/trash' },
         ...(isAdmin ? [{ icon: Settings, label: 'Whitelist', path: '/admin/whitelist' }] : [])
     ];
 
@@ -76,7 +98,13 @@ export function Sidebar() {
                         Projects
                     </div>
                     <div className="space-y-1">
-                        {projects.length > 0 ? (
+                        {isLoading && projects.length === 0 ? (
+                            <div className="px-3 py-2 space-y-2">
+                                <div className="h-8 bg-slate-50 rounded-lg animate-pulse" />
+                                <div className="h-8 bg-slate-50 rounded-lg animate-pulse" />
+                                <div className="h-8 bg-slate-50 rounded-lg animate-pulse" />
+                            </div>
+                        ) : projects.length > 0 ? (
                             projects.map((project) => {
                                 const isActive = pathname === `/drive/${project.id}` || pathname.startsWith(`/drive/${project.id}/`);
                                 return (
@@ -132,7 +160,7 @@ export function Sidebar() {
                     </div>
                 )}
                 <button
-                    onClick={signOut}
+                    onClick={() => setIsSignOutModalOpen(true)}
                     className="flex items-center gap-3 px-3 py-2.5 w-full text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                 >
                     <LogOut className="w-5 h-5" />
@@ -148,6 +176,38 @@ export function Sidebar() {
                     </p>
                 </div>
             </div>
+
+            {/* Sign Out Confirmation Modal */}
+            {isSignOutModalOpen && (
+                <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center backdrop-blur-sm animate-in fade-in duration-200">
+                    <div className="bg-white rounded-2xl w-full max-w-sm p-6 shadow-2xl scale-100 animate-in zoom-in-95 duration-200 transform m-4 text-center">
+                        <div className="w-12 h-12 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
+                            <LogOut className="w-6 h-6 ml-0.5" />
+                        </div>
+                        <h3 className="text-lg font-bold text-slate-900 mb-2">Sign Out?</h3>
+                        <p className="text-sm text-slate-500 mb-6">
+                            Are you sure you want to sign out of your account?
+                        </p>
+                        <div className="flex gap-3">
+                            <button
+                                onClick={() => setIsSignOutModalOpen(false)}
+                                className="flex-1 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl font-medium transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={() => {
+                                    signOut();
+                                    setIsSignOutModalOpen(false);
+                                }}
+                                className="flex-1 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl font-semibold shadow-lg shadow-red-200 transition-all"
+                            >
+                                Sign Out
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

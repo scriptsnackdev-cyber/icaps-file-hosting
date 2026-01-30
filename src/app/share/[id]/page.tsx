@@ -194,7 +194,7 @@ export default function SharePage() {
                     <div className="flex flex-col gap-2">
                         {isUnauthorized ? (
                             <button
-                                onClick={() => router.push(`/login?redirect=${encodeURIComponent(window.location.pathname)}`)}
+                                onClick={() => router.push(`/login?next=${encodeURIComponent(window.location.pathname)}`)}
                                 className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl transition-all flex items-center justify-center gap-2"
                             >
                                 Log In to Access

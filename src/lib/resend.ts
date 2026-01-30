@@ -19,9 +19,9 @@ export async function sendActivityNotification({
   timestamp: string;
 }) {
   const actionLabel = {
-    'UPLOADED': 'อัปโหลดไฟล์ใหม่',
-    'DELETED': 'ลบไฟล์',
-    'VERSION_UPDATED': 'อัปเดตเวอร์ชันไฟล์'
+    'UPLOADED': 'File Uploaded',
+    'DELETED': 'File Deleted',
+    'VERSION_UPDATED': 'Version Updated'
   }[action] || action;
 
   const actionColor = {
@@ -34,7 +34,7 @@ export async function sendActivityNotification({
     const { data, error } = await resend.emails.send({
       from: 'ICAPS Cloud <ICAPS-Cloud@icaps.cloud>',
       to: [to],
-      subject: `[${projectName}] แจ้งเตือนกิจกรรม: ${actionLabel}`,
+      subject: `[${projectName}] Activity Alert: ${actionLabel}`,
       html: `
 <!DOCTYPE html>
 <html>
@@ -46,7 +46,11 @@ export async function sendActivityNotification({
       margin: 0;
       padding: 0;
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-family: 'Sukhumvit Set', 'Sarabun', 'Thonburi', 'Leelawadee UI', 'Leelawadee', 
+                   -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', 
+                   Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
     }
     .email-wrapper {
       padding: 40px 20px;
@@ -64,32 +68,25 @@ export async function sendActivityNotification({
     .header {
       margin-bottom: 32px;
     }
-    .logo {
-      margin-bottom: 8px;
-    }
-    .logo img {
-      height: 72px;
-      width: auto;
-      display: inline-block;
-    }
     .tagline {
       font-size: 13px;
       color: #9ca3af;
-      font-weight: 500;
+      font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 1.5px;
     }
     .greeting {
       color: #111827;
-      font-size: 18px;
-      font-weight: 600;
+      font-size: 20px;
+      font-weight: 700;
       margin-bottom: 12px;
     }
     .text {
       color: #6b7280;
-      font-size: 15px;
-      line-height: 1.6;
+      font-size: 16px;
+      line-height: 1.7;
       margin-bottom: 32px;
+      font-weight: 400;
     }
     .activity-container {
       background: linear-gradient(135deg, #f0f9ff 0%, #e0e7ff 100%);
@@ -132,23 +129,23 @@ export async function sendActivityNotification({
         flex-shrink: 0;
     }
     .detail-value {
-        font-size: 14px;
-        color: #374151;
-        font-weight: 500;
+        font-size: 15px;
+        color: #000000;
+        font-weight: 700;
         word-break: break-word;
     }
     .status-badge {
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      background: #f3f4f6;
-      color: #4b5563;
-      font-size: 13px;
+      background: #fef3c7;
+      color: #92400e;
+      font-size: 14px;
       font-weight: 600;
       padding: 10px 20px;
       border-radius: 100px;
       margin-top: 24px;
-      border: 1px solid #e5e7eb;
+      border: 1px solid #fbbf24;
     }
     .status-badge::before {
       content: '🔔';
@@ -160,24 +157,33 @@ export async function sendActivityNotification({
       margin: 32px 0;
     }
     .footer {
-      font-size: 12px;
+      font-size: 13px;
       color: #9ca3af;
       line-height: 1.8;
+      font-weight: 400;
     }
     .footer-warning {
       color: #6b7280;
       font-weight: 500;
       margin-bottom: 16px;
+      font-size: 14px;
     }
     .copyright {
       color: #d1d5db;
-      font-size: 11px;
+      font-size: 12px;
       margin-top: 16px;
+      font-weight: 400;
     }
     @media only screen and (max-width: 600px) {
       .container {
         padding: 32px 24px;
         border-radius: 16px;
+      }
+      .greeting {
+        font-size: 18px;
+      }
+      .text {
+        font-size: 15px;
       }
     }
   </style>
@@ -186,50 +192,47 @@ export async function sendActivityNotification({
   <div class="email-wrapper">
     <div class="container">
       <div class="header">
-        <div class="logo">
-          <img src="https://hxzobmgohwrmgjcylufh.supabase.co/storage/v1/object/public/assets/ICAPS.png" alt="icaps.cloud logo">
-        </div>
         <div class="tagline">Cloud Infrastructure</div>
       </div>
       
-      <div class="greeting">สวัสดีครับ 👋</div>
+      <div class="greeting">Hello 👋</div>
       <p class="text">
-        มีการอัปเดตกิจกรรมในโปรเจกต์ <strong>${projectName}</strong><br>
-        รายละเอียดด้านล่าง
+        There's an activity update in project <strong>${projectName}</strong><br>
+        Details below
       </p>
       
       <div class="activity-container">
         <div class="detail-row">
-            <div class="detail-label">ผู้ใช้งาน</div>
+            <div class="detail-label">User</div>
             <div class="detail-value">${userName}</div>
         </div>
         <div class="detail-row">
-            <div class="detail-label">กิจกรรม</div>
+            <div class="detail-label">Action</div>
             <div class="detail-value" style="color: ${actionColor}">${actionLabel}</div>
         </div>
         <div class="detail-row">
-            <div class="detail-label">ไฟล์</div>
+            <div class="detail-label">File</div>
             <div class="detail-value">${fileName}</div>
         </div>
         <div class="detail-row">
-            <div class="detail-label">เวลา</div>
+            <div class="detail-label">Time</div>
             <div class="detail-value">${timestamp}</div>
         </div>
       </div>
       
       <div class="status-badge">
-        แจ้งเตือนอัตโนมัติจากระบบ
+        Automated system notification
       </div>
       
       <div class="divider"></div>
       
       <div class="footer">
         <div class="footer-warning">
-          อีเมลนี้ถูกส่งอัตโนมัติเนื่องจากการตั้งค่าการแจ้งเตือนในโปรเจกต์ของคุณ<br>
-          หากมีข้อสงสัยสามารถตรวจสอบได้ที่ Dashboard
+          This email was sent automatically based on your project notification settings.<br>
+          If you have any questions, please check your Dashboard.
         </div>
         <div class="copyright">
-          &copy; 2026 ICAPS Clouds Power by Script Snack Dev
+          &copy; 2026 ICAPS Cloud Powered by Script Snack Dev
         </div>
       </div>
     </div>

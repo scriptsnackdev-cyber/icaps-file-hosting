@@ -21,15 +21,17 @@ async function getAllFiles(supabase: any, folderId: string, currentPath: string 
         .eq('parent_id', folderId)
         .eq('type', 'FOLDER');
 
-    let allFiles: { key: string; name: string }[] = files.map((f: any) => ({
+    let allFiles: { key: string; name: string }[] = (files || []).map((f: any) => ({
         key: f.r2_key,
         name: currentPath + f.name
     }));
 
     // 3. Recurse into subfolders
-    for (const folder of folders) {
-        const subFiles = await getAllFiles(supabase, folder.id, currentPath + folder.name + '/');
-        allFiles = [...allFiles, ...subFiles];
+    if (folders) {
+        for (const folder of folders) {
+            const subFiles = await getAllFiles(supabase, folder.id, currentPath + folder.name + '/');
+            allFiles = [...allFiles, ...subFiles];
+        }
     }
 
     return allFiles;
@@ -38,34 +40,60 @@ async function getAllFiles(supabase: any, folderId: string, currentPath: string 
 export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const folderId = searchParams.get('folderId');
+    const nodeIdsParam = searchParams.get('nodeIds'); // Comma separated IDs
+    const nodeIds = nodeIdsParam ? nodeIdsParam.split(',').filter(Boolean) : [];
 
-    if (!folderId) {
-        return new NextResponse('Folder ID is required', { status: 400 });
+    if (!folderId && nodeIds.length === 0) {
+        return new NextResponse('Folder ID or Node IDs are required', { status: 400 });
     }
-
-    // AUTH / SHARE CHECK
-    // If accessed via share link logic, we might need to validate permission differently.
-    // For now, assuming this is called from the authenticated dashboard OR a valid public share page which checks logic.
-    // Ideally updateSession/middleware handles auth, but for public download we need the NODE info to check "sharing_scope".
 
     const supabase = await createClient();
 
-    // Check if folder exists and is accessible
-    const { data: folder } = await supabase.from('storage_nodes').select('*').eq('id', folderId).single();
-    if (!folder) return new NextResponse('Folder not found', { status: 404 });
-
-    // REAL permission check: Is user owner? OR Is file Public?
-    // For this demo, if it's not PUBLIC, we check Auth.
-    // const { data: { user } } = await supabase.auth.getUser();
-    // if (folder.sharing_scope === 'PRIVATE' && !user) {
-    //     return new NextResponse('Unauthorized', { status: 401 });
-    // }
+    let filesToZip: { key: string; name: string }[] = [];
+    let zipName = 'download.zip';
 
     try {
-        const filesToZip = await getAllFiles(supabase, folderId);
+        if (nodeIds.length > 0) {
+            // Bulk Selection Mode
+            zipName = 'bulk_download.zip';
+
+            // Fetch selected nodes
+            const { data: nodes } = await supabase
+                .from('storage_nodes')
+                .select('*')
+                .in('id', nodeIds);
+
+            if (!nodes || nodes.length === 0) {
+                return new NextResponse('No valid files found', { status: 404 });
+            }
+
+            for (const node of nodes) {
+                if (node.type === 'FILE') {
+                    filesToZip.push({
+                        key: node.r2_key,
+                        name: node.name
+                    });
+                } else if (node.type === 'FOLDER') {
+                    const subFiles = await getAllFiles(supabase, node.id, node.name + '/');
+                    filesToZip = [...filesToZip, ...subFiles];
+                }
+            }
+            // If only one folder was selected, maybe name the zip after it? 
+            if (nodes.length === 1 && nodes[0].type === 'FOLDER') {
+                zipName = `${nodes[0].name}.zip`;
+            }
+
+        } else if (folderId) {
+            // Single Folder Mode (Legacy/Direct)
+            const { data: folder } = await supabase.from('storage_nodes').select('*').eq('id', folderId).single();
+            if (!folder) return new NextResponse('Folder not found', { status: 404 });
+
+            zipName = `${folder.name}.zip`;
+            filesToZip = await getAllFiles(supabase, folderId);
+        }
 
         if (filesToZip.length === 0) {
-            return new NextResponse('Folder is empty', { status: 400 });
+            return new NextResponse('Selection is empty', { status: 400 });
         }
 
         // Create PassThrough stream to pipe archiver to response
@@ -84,13 +112,10 @@ export async function GET(request: NextRequest) {
                 const s3Response = await r2.send(command);
                 const stream = s3Response.Body;
                 if (stream) {
-                    // Cast to any to bypass type mismatch between Web and Node streams
-                    // In a Node.js environment, the SDK stream implements Node Readable
                     archive.append(stream as any, { name: file.name });
                 }
             } catch (err) {
                 console.error(`Failed to download ${file.name}`, err);
-                // Optionally append a text file saying it failed?
                 archive.append(Buffer.from(`Error downloading this file.`), { name: file.name + '.error.txt' });
             }
         }
@@ -100,7 +125,7 @@ export async function GET(request: NextRequest) {
         return new NextResponse(passThrough as any, {
             headers: {
                 'Content-Type': 'application/zip',
-                'Content-Disposition': `attachment; filename="${folder.name}.zip"`,
+                'Content-Disposition': `attachment; filename="${zipName}"`,
             },
         });
 

@@ -10,7 +10,9 @@ export async function GET(request: NextRequest) {
     const path = searchParams.get('path'); // e.g. "folder1/folder2"
     const projectId = searchParams.get('project');
 
-    if (!projectId) {
+    const isTrashView = searchParams.get('view') === 'trash';
+
+    if (!projectId && !isTrashView) {
         return NextResponse.json({ error: 'Project context required' }, { status: 400 });
     }
 
@@ -22,22 +24,23 @@ export async function GET(request: NextRequest) {
     }
 
     try {
-        // Resolve Project ID if it's a name/slug
         let resolvedProjectId = projectId;
-        const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId);
+        if (projectId) {
+            const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId);
 
-        if (!isUUID) {
-            // Try to find by name - Use limit(1) to avoid duplicate name issues
-            const { data: projs } = await supabase
-                .from('projects')
-                .select('id')
-                .eq('name', decodeURIComponent(projectId))
-                .limit(1);
+            if (!isUUID) {
+                // Try to find by name - Use limit(1) to avoid duplicate name issues
+                const { data: projs } = await supabase
+                    .from('projects')
+                    .select('id')
+                    .eq('name', decodeURIComponent(projectId))
+                    .limit(1);
 
-            if (projs && projs.length > 0) {
-                resolvedProjectId = projs[0].id;
-            } else {
-                return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+                if (projs && projs.length > 0) {
+                    resolvedProjectId = projs[0].id;
+                } else {
+                    return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+                }
             }
         }
         let currentFolderId: string | null = null;
@@ -81,24 +84,44 @@ export async function GET(request: NextRequest) {
         }
 
         // Fetch Children of Resolved ID within Project
+        // Initialize Base Query
         let childrenQuery = supabase
             .from('storage_nodes')
-            .select('*')
-            .eq('project_id', resolvedProjectId) // Filter by Project!
-            .order('type', { ascending: false }) // Folders first
+            .select(isTrashView ? '*, projects(name)' : '*')
+            .order('type', { ascending: false })
             .order('name', { ascending: true });
 
-        if (currentFolderId) {
-            childrenQuery = childrenQuery.eq('parent_id', currentFolderId);
+        if (isTrashView) {
+            // Trash view: Flat list of items marked as TRASHED
+            // Re-initialize query for trash to be safe/clear
+            childrenQuery = supabase
+                .from('storage_nodes')
+                .select('*, projects(name)')
+                .eq('status', 'TRASHED')
+                .order('trashed_at', { ascending: false, nullsFirst: true });
+
+            if (resolvedProjectId) {
+                childrenQuery = childrenQuery.eq('project_id', resolvedProjectId);
+            } else {
+                // Global Trash: Show user's own trash across all projects
+                childrenQuery = childrenQuery.eq('owner_email', user.email);
+            }
+
         } else {
-            childrenQuery = childrenQuery.is('parent_id', null);
+            // Normal View: Filter out deleted and trashed
+            childrenQuery = childrenQuery.eq('project_id', resolvedProjectId);
+
+            if (currentFolderId) {
+                childrenQuery = childrenQuery.eq('parent_id', currentFolderId);
+            } else {
+                childrenQuery = childrenQuery.is('parent_id', null);
+            }
+            childrenQuery = childrenQuery.or('status.eq.ACTIVE,status.is.null');
         }
 
-        // Filter out soft-deleted items
-        childrenQuery = childrenQuery.neq('status', 'DELETED_PENDING');
-
-        const { data: nodes, error: childrenError } = await childrenQuery;
+        const { data: nodesData, error: childrenError } = await childrenQuery;
         if (childrenError) throw childrenError;
+        const nodes = nodesData as any[];
 
         // Version Control Filter: Show only the latest version of each file name
         const latestNodesMap = new Map<string, any>();
@@ -243,6 +266,7 @@ export async function DELETE(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
     const projectId = searchParams.get('project');
+    const permanent = searchParams.get('permanent') === 'true';
 
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
@@ -371,56 +395,51 @@ export async function DELETE(request: NextRequest) {
             }
         }
 
-        // --- SOFT DELETE ---
-        // 1. Mark as DELETED_PENDING immediately so it disappears from UI
-        const { error: updateError } = await supabase
-            .from('storage_nodes')
-            .update({ status: 'DELETED_PENDING' })
-            .eq('id', id);
+        // --- SOFT DELETE vs TRASH ---
+        if (permanent) {
+            // PERMANENT DELETE (Original Logic)
 
-        if (updateError) throw updateError;
+            // 1. Mark as DELETED_PENDING immediately so it disappears from UI
+            const { error: updateError } = await supabase
+                .from('storage_nodes')
+                .update({ status: 'DELETED_PENDING' })
+                .eq('id', id);
 
-        // 2. Fire and Forget: Invoke Background Edge Function to clean up R2 and DB rows
-        // We don't await this to ensure UI returns immediately
-        const functionUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/delete-nodes`;
+            if (updateError) throw updateError;
 
-        fetch(functionUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`
-            },
-            body: JSON.stringify({
-                nodeId: id,
-                projectId: targetNode.project_id,
-                userEmail: user.email,
-                isAdmin: isAdmin
-            })
-        }).catch(err => console.error("Failed to trigger background delete:", err));
+            // 2. Fire and Forget: Invoke Background Edge Function to clean up R2 and DB rows
+            const functionUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/delete-nodes`;
 
-        // --- EMAIL NOTIFICATION (Optional: maybe move to Edge Function if slow, but keeping here is fine for now as it's just one email) ---
-        try {
-            if (resolvedProjectId) {
-                const { data: project } = await supabase.from('projects').select('name, created_by, settings').eq('id', resolvedProjectId).single();
-                if (project && project.created_by !== user.id && project.settings?.notify_on_activity) {
-                    const { data: rootFolder } = await supabase.from('storage_nodes').select('owner_email').eq('project_id', resolvedProjectId).is('parent_id', null).limit(1).single();
-                    if (rootFolder?.owner_email) {
-                        // We do this async without await to return faster
-                        sendActivityNotification({
-                            to: rootFolder.owner_email,
-                            projectName: project.name,
-                            userName: user.email || 'Unknown User',
-                            action: 'DELETED',
-                            fileName: targetNode.name,
-                            timestamp: new Date().toLocaleString()
-                        }).catch(e => console.error("Email send failed", e));
-                    }
-                }
-            }
-        } catch (e) { console.error("Notification setup failed", e); }
+            fetch(functionUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`
+                },
+                body: JSON.stringify({
+                    nodeId: id,
+                    projectId: targetNode.project_id,
+                    userEmail: user.email,
+                    isAdmin: isAdmin
+                })
+            }).catch(err => console.error("Failed to trigger background delete:", err));
 
-        // Return success immediately (size will be reclaimed eventually)
-        return NextResponse.json({ success: true, message: 'Deletion scheduled in background', deletedSize: 0 });
+            return NextResponse.json({ success: true, message: 'Permanently deleted', deletedSize: 0 });
+
+        } else {
+            // MOVE TO TRASH
+            const { error: updateError } = await supabase
+                .from('storage_nodes')
+                .update({
+                    status: 'TRASHED',
+                    trashed_at: new Date().toISOString()
+                })
+                .eq('id', id);
+
+            if (updateError) throw updateError;
+
+            return NextResponse.json({ success: true, message: 'Moved to trash' });
+        }
 
     } catch (error: any) {
         console.error("Delete Error:", error);
@@ -438,7 +457,7 @@ export async function PATCH(request: NextRequest) {
 
     try {
         const body = await request.json();
-        const { id, sharing_scope, share_password, parentId, name } = body;
+        const { id, sharing_scope, share_password, parentId, name, status } = body;
 
         if (!id) {
             return NextResponse.json({ error: 'Node ID is required' }, { status: 400 });
@@ -477,6 +496,12 @@ export async function PATCH(request: NextRequest) {
 
         // 3. Update Node
         const updates: any = {};
+        if (status) {
+            updates.status = status;
+            if (status === 'ACTIVE') {
+                updates.trashed_at = null;
+            }
+        }
         if (sharing_scope) updates.sharing_scope = sharing_scope;
         if (parentId !== undefined) updates.parent_id = parentId; // Support for Moving
         // Allow setting password to null (empty string/null)

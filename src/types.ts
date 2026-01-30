@@ -12,6 +12,8 @@ export interface StorageNode {
     owner_email?: string;
     sharing_scope: 'PRIVATE' | 'PUBLIC_READ' | 'PUBLIC_EDIT';
     version: number;
+    status?: 'ACTIVE' | 'TRASHED' | 'DELETED_PENDING';
+    trashed_at?: string;
 }
 
 export type Permission = 'VIEW' | 'EDIT';
