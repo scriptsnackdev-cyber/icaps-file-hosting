@@ -1,15 +1,16 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import dynamic from 'next/dynamic';
 import { Sidebar } from '@/components/layout/Sidebar';
 import {
     Cloud, Search, Plus, Loader2, FolderPlus, FileUp, Home as HomeIcon,
-    ChevronRight, Copy, Share2, Download, Trash2, FileText, Folder,
+    ChevronRight, Copy, Share2, Download, Trash2, FileText, Folder, Calendar,
     Settings, MoreVertical, Upload, FolderUp, Lock, Globe, Users, X, Check,
     AlertCircle, ArrowUpCircle, RotateCcw, History, Pencil, Info, ArrowUp, ArrowDown
 } from 'lucide-react';
-import { CreateNoteModal } from '@/components/drive/CreateNoteModal';
-import { MoveToModal } from '@/components/drive/MoveToModal';
+const CreateNoteModal = dynamic(() => import('@/components/drive/CreateNoteModal').then(mod => mod.CreateNoteModal), { ssr: false });
+const MoveToModal = dynamic(() => import('@/components/drive/MoveToModal').then(mod => mod.MoveToModal), { ssr: false });
 import { StorageNode, Project } from '@/types';
 import { createClient } from '@/utils/supabase/client';
 import { format } from 'date-fns';
@@ -21,7 +22,10 @@ import { useStorage } from '@/contexts/StorageContext';
 
 import { useAuth } from '@/contexts/AuthContext';
 
-import { FileInfoPanel } from '@/components/drive/FileInfoPanel';
+const FileInfoPanel = dynamic(() => import('@/components/drive/FileInfoPanel').then(mod => mod.FileInfoPanel), { ssr: false });
+import { PlannerEditor } from '@/components/drive/PlannerEditor';
+import { InputModal } from '@/components/ui/InputModal';
+import { ConfirmModal } from '@/components/ui/ConfirmModal';
 
 export default function DrivePage() {
     const params = useParams();
@@ -40,6 +44,9 @@ export default function DrivePage() {
     const [projects, setProjects] = useState<Project[]>([]);
     const [currentProject, setCurrentProject] = useState<Project | null>(null);
     const [nodes, setNodes] = useState<StorageNode[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+    const [folderChain, setFolderChain] = useState<{ id: string, name: string }[]>([]);
 
     // New Actions State
     const [isMoveToModalOpen, setIsMoveToModalOpen] = useState(false);
@@ -69,18 +76,26 @@ export default function DrivePage() {
             }
         }
 
-        const savedNodes = localStorage.getItem(`cache_nodes_${urlProjectId}_${folderPathKey}`);
+        const cacheKey = `cache_nodes_${urlProjectId}_${folderPathKey}`;
+        const savedNodes = localStorage.getItem(cacheKey);
         if (savedNodes) {
             try {
                 setNodes(JSON.parse(savedNodes));
+                // Instant load!
+                setLoading(false);
             } catch (e) {
                 console.error('Failed to parse cached nodes', e);
+                // Fallback to loader
+                setNodes([]);
+                setLoading(true);
             }
+        } else {
+            // Navigation to new path without cache: Show loader
+            setNodes([]);
+            setLoading(true);
         }
     }, [urlProjectId, folderPathKey]);
-    const [loading, setLoading] = useState(true);
-    const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
-    const [folderChain, setFolderChain] = useState<{ id: string, name: string }[]>([]);
+
 
     const breadcrumbsToRender = React.useMemo(() => {
         return folderPath.map((name, index) => {
@@ -144,7 +159,97 @@ export default function DrivePage() {
     const [settingsTab, setSettingsTab] = useState<'general' | 'members'>('general');
     const [isSavingSettings, setIsSavingSettings] = useState(false);
     const [itemToDelete, setItemToDelete] = useState<StorageNode | null>(null);
-    const [isDeleting, setIsDeleting] = useState(false);
+    // Planner State
+    const [plannerState, setPlannerState] = useState<{
+        isOpen: boolean;
+        file: StorageNode | null;
+        content: any | null;
+    }>({ isOpen: false, file: null, content: null });
+
+    const [isCreatePlannerModalOpen, setIsCreatePlannerModalOpen] = useState(false);
+
+    // Helper for Small File Proxy Upload (Workaround for CORS)
+    const uploadProxyFile = async (file: File) => {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('filename', file.name);
+        formData.append('parentId', currentFolderId || 'null');
+        if (currentProject) formData.append('projectId', currentProject.id);
+
+        const res = await fetch('/api/drive/upload/proxy', {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.error || 'Upload failed');
+        }
+        return 'SUCCESS';
+    };
+
+    const handleCreatePlannerClick = () => {
+        if (!currentProject) {
+            showToast("Please open a project first", "error");
+            return;
+        }
+        setIsUploadMenuOpen(false);
+        setIsCreatePlannerModalOpen(true);
+    };
+
+    const handleCreatePlannerSubmit = async (name: string) => {
+        if (!name) return;
+
+        try {
+            const fileName = `${name}.splan`;
+            const initialContent = JSON.stringify({
+                title: name,
+                tasks: [],
+                lastModified: new Date().toISOString()
+            });
+
+            const file = new File([initialContent], fileName, { type: 'text/plain' });
+
+            // Use Proxy Upload
+            await uploadProxyFile(file);
+            showToast("Planner created", "success");
+            fetchNodes(true);
+        } catch (e) {
+            console.error("Planner creation error:", e);
+            showToast("Error creating planner", "error");
+        }
+    };
+
+    const handleSavePlanner = async (data: any) => {
+        if (!plannerState.file) return;
+
+        const fileName = plannerState.file.name;
+        const content = JSON.stringify(data);
+        const file = new File([content], fileName, { type: 'text/plain' });
+
+        try {
+            await uploadProxyFile(file);
+            fetchNodes(true, true);
+            showToast("Planner saved successfully", "success");
+        } catch (e) {
+            console.error("Save planner failed", e);
+            showToast("Failed to save planner", "error");
+            throw e;
+        }
+    };
+
+    // Prevent closing tab while uploading
+    useEffect(() => {
+        const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+            if (isUploadingRef.current) {
+                e.preventDefault();
+                e.returnValue = ''; // Chrome requires returnValue to be set
+            }
+        };
+
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    }, []);
 
     // Share Modal State
     const [isShareModalOpen, setIsShareModalOpen] = useState(false);
@@ -365,10 +470,46 @@ export default function DrivePage() {
 
     const handlePreview = async (node: StorageNode) => {
         if (node.type === 'FOLDER') return;
+
+        const ext = node.name.split('.').pop()?.toLowerCase() || '';
+
+        // SPLAN: Open Planner Editor directly
+        if (ext === 'splan') {
+            if (!node.r2_key) {
+                showToast("File content not found", "error");
+                return;
+            }
+
+            // Show loading feedback
+            showToast("Opening planner...", "info");
+
+            try {
+                const url = `/api/files/${encodeURIComponent(node.r2_key)}?filename=${encodeURIComponent(node.name)}`;
+                const res = await fetch(url);
+
+                if (res.ok) {
+                    const text = await res.text();
+                    try {
+                        const json = JSON.parse(text);
+                        setPlannerState({ isOpen: true, file: node, content: json });
+                    } catch (e) {
+                        console.error("Invalid splan JSON", e);
+                        showToast("Invalid planner file format", "error");
+                    }
+                } else {
+                    throw new Error("Failed to fetch file");
+                }
+            } catch (e) {
+                console.error("Error opening planner:", e);
+                showToast("Failed to open planner", "error");
+            }
+            return;
+        }
+
+        // Standard Preview Logic
         setPreviewNode(node);
         setPreviewContent(null);
 
-        const ext = node.name.split('.').pop()?.toLowerCase() || '';
         const isText = ['txt', 'md', 'json', 'js', 'ts', 'tsx', 'css', 'html', 'py', 'java', 'c', 'cpp', 'csv', 'xml', 'yml', 'yaml'].includes(ext);
 
         if (isText && node.r2_key) {
@@ -607,9 +748,11 @@ export default function DrivePage() {
     useEffect(() => {
         fetchNodes();
 
-        // Background Polling every 5 seconds
+        // Background Polling every 5 seconds (Only when visible)
         const interval = setInterval(() => {
-            fetchNodes(true, true); // Force fetch, but silent
+            if (document.visibilityState === 'visible') {
+                fetchNodes(true, true);
+            }
         }, 5000);
 
         return () => clearInterval(interval);
@@ -1044,6 +1187,93 @@ export default function DrivePage() {
         e.target.value = '';
     }
 
+    // Generic Concurrent Upload Helper
+    const uploadFilesConcurrent = async (files: File[], parentIdResolver: (file: File) => string | null) => {
+        const CONCURRENCY_LIMIT = 5;
+        const pool: Promise<void>[] = [];
+
+        // Initialize Batch Stats if not already set (e.g. by startFolderUpload)
+        // If startFolderUpload called this, it might have set it. 
+        // We can check if batchStatsRef.current.totalBytes is 0 or if we're starting a new separate batch.
+        // For simplicity, let's just add to the current stats if running, or start new.
+
+        const isNewBatch = !isUploadingRef.current || batchStatsRef.current.totalBytes === 0;
+
+        if (isNewBatch) {
+            abortControllerRef.current = new AbortController();
+            isUploadingRef.current = true;
+            const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
+            batchStatsRef.current = { startTime: Date.now(), totalBytes };
+            filesProgressRef.current.clear();
+            setUploadStats({});
+        } else {
+            // Append stats
+            batchStatsRef.current.totalBytes += files.reduce((acc, f) => acc + f.size, 0);
+        }
+
+        // Create Tasks globally first (Visual feedback)
+        const fileTasks = files.map(file => {
+            const cleanName = file.name.split('/').pop()?.split('\\').pop() || file.name;
+            const id = uuidv4();
+            return { id, file, name: cleanName };
+        });
+
+        // Add to UI
+        const newUiTasks: AsyncTask[] = fileTasks.map(t => ({
+            id: t.id,
+            type: 'UPLOAD',
+            name: t.name,
+            status: 'PENDING'
+        }));
+        setTasks(prev => [...prev, ...newUiTasks]);
+
+        // Process
+        for (let i = 0; i < files.length; i++) {
+            if (!isUploadingRef.current) break;
+
+            const file = files[i];
+            const taskId = fileTasks[i].id;
+            const targetParentId = parentIdResolver(file) || currentFolderId;
+
+            const task = async () => {
+                let retries = 3;
+                const backoffStart = 1000;
+                while (retries > 0) {
+                    if (!isUploadingRef.current) break;
+                    try {
+                        const status = await uploadFileToId(file, targetParentId, taskId, undefined, true);
+                        if (status === 'SUCCESS' || status === 'CONFLICT' || status === 'CANCELLED') break;
+                    } catch (e) { console.error(e); }
+
+                    retries--;
+                    if (retries > 0 && isUploadingRef.current) {
+                        await new Promise(r => setTimeout(r, backoffStart * Math.pow(2, 3 - retries - 1)));
+                    }
+                }
+            };
+
+            const p = task().then(() => {
+                const idx = pool.indexOf(p);
+                if (idx !== -1) pool.splice(idx, 1);
+            });
+            pool.push(p);
+
+            if (i % 20 === 0) refreshStorage();
+
+            if (pool.length >= CONCURRENCY_LIMIT) {
+                await Promise.race(pool);
+            }
+        }
+
+        await Promise.all(pool);
+
+        if (isNewBatch) {
+            isUploadingRef.current = false;
+            fetchNodes(true);
+            refreshStorage();
+        }
+    };
+
     // Stop Upload Handler
     const handleStopUpload = () => {
         if (isUploadingRef.current) {
@@ -1161,71 +1391,15 @@ export default function DrivePage() {
             }
 
             // 3. Upload files with Concurrency Pool
-            const CONCURRENCY_LIMIT = 5;
-            const pool: Promise<void>[] = [];
-
-            for (let i = 0; i < files.length; i++) {
-                if (!isUploadingRef.current) break;
-
-                const file = files[i];
+            // Reuse the new helper
+            await uploadFilesConcurrent(files, (file) => {
                 const pathParts = file.webkitRelativePath.split('/');
                 pathParts.pop();
                 const folderPath = pathParts.join('/');
+                return folderIdMap.get(folderPath) || currentFolderId;
+            });
 
-                const parentId = folderIdMap.get(folderPath) || currentFolderId;
-
-                // Create a promise for this upload
-                const task = async () => {
-                    let retries = 3;
-                    const backoffStart = 1000;
-
-                    while (retries > 0) {
-                        if (!isUploadingRef.current) break; // Stop if cancelled
-
-                        // Reset status to PENDING if retrying (visual feedback not necessary but good logic)
-                        // updateTask(fileTaskIds[i], 'PENDING'); 
-
-                        try {
-                            const status = await uploadFileToId(file, parentId, fileTaskIds[i], undefined, true);
-                            if (status === 'SUCCESS' || status === 'CONFLICT' || status === 'CANCELLED') {
-                                break; // Done (or conflict/cancelled means we stop retrying)
-                            }
-                            // If ERROR, continue to retry
-                        } catch (e) {
-                            // uploadFileToId swallows errors so this catch block might not be hit, 
-                            // but good for safety.
-                        }
-
-                        retries--;
-                        if (retries > 0 && isUploadingRef.current) {
-                            // Exponential Backoff: 1s, 2s, 4s
-                            const waitTime = backoffStart * Math.pow(2, 3 - retries - 1);
-                            await new Promise(r => setTimeout(r, waitTime));
-                        }
-                    }
-                };
-
-                // Add to pool
-                const p = task().then(() => {
-                    // Remove self from pool when done
-                    const matchIdx = pool.indexOf(p);
-                    if (matchIdx !== -1) pool.splice(matchIdx, 1);
-                });
-                pool.push(p);
-
-                // Update storage quota periodically (every 20 items) so user sees progress
-                if (i % 20 === 0) {
-                    refreshStorage();
-                }
-
-                // If pool is full, wait for at least one to finish
-                if (pool.length >= CONCURRENCY_LIMIT) {
-                    await Promise.race(pool);
-                }
-            }
-
-            // Wait for remaining
-            await Promise.all(pool);
+            // Removed legacy manual pool logic as we use uploadFilesConcurrent now
 
             // --- SEND SINGLE FOLDER NOTIFICATION ---
             if (isUploadingRef.current && files.length > 0 && currentProject) {
@@ -1256,9 +1430,10 @@ export default function DrivePage() {
     };
 
     const handleFileUploadChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-        await uploadFile(file);
+        const rawFiles = e.target.files;
+        if (!rawFiles || rawFiles.length === 0) return;
+        const files = Array.from(rawFiles);
+        await uploadFilesConcurrent(files, () => currentFolderId);
         e.target.value = '';
     };
 
@@ -1331,6 +1506,50 @@ export default function DrivePage() {
         }
     };
 
+    // Recursive File/Folder Traversal
+    const traverseFileTree = async (item: any, path: string = ""): Promise<File[]> => {
+        if (item.isFile) {
+            return new Promise((resolve) => {
+                item.file((file: File) => {
+                    const fullPath = path ? path + "/" + file.name : file.name;
+                    // Monkey patch webkitRelativePath for folder structure preservation
+                    Object.defineProperty(file, 'webkitRelativePath', {
+                        value: fullPath,
+                        writable: false
+                    });
+                    resolve([file]);
+                });
+            });
+        } else if (item.isDirectory) {
+            const dirReader = item.createReader();
+            let entries: any[] = [];
+
+            try {
+                const readBatch = async () => {
+                    return new Promise<any[]>((resolve, reject) => {
+                        dirReader.readEntries(resolve, reject);
+                    });
+                };
+
+                let batch: any[] = [];
+                do {
+                    batch = await readBatch();
+                    entries = entries.concat(batch);
+                } while (batch.length > 0);
+            } catch (e) {
+                console.error("Error reading directory", e);
+            }
+
+            let files: File[] = [];
+            for (const entry of entries) {
+                const subFiles = await traverseFileTree(entry, path ? path + "/" + item.name : item.name);
+                files = [...files, ...subFiles];
+            }
+            return files;
+        }
+        return [];
+    };
+
     const handleDrop = async (e: React.DragEvent) => {
         e.preventDefault();
         e.stopPropagation();
@@ -1339,18 +1558,46 @@ export default function DrivePage() {
         // If dragging internal node, ignore main drop area (Move happens in row onDrop)
         if (draggedNode) return;
 
-        // Simple Drop supports files currently.
-        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-            for (let i = 0; i < e.dataTransfer.files.length; i++) {
-                await uploadFileToId(e.dataTransfer.files[i], currentFolderId);
+        const items = e.dataTransfer.items;
+
+        // Advanced Folder/File Drop Support
+        if (items && items.length > 0 && typeof items[0].webkitGetAsEntry === 'function') {
+            const entries = [];
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].kind === 'file') {
+                    const entry = items[i].webkitGetAsEntry();
+                    if (entry) entries.push(entry);
+                }
             }
+
+            if (entries.length > 0) {
+                showToast("Processing files...", "info");
+                const allFiles: File[] = [];
+
+                for (const entry of entries) {
+                    const files = await traverseFileTree(entry);
+                    allFiles.push(...files);
+                }
+
+                if (allFiles.length > 0) {
+                    const totalSize = allFiles.reduce((acc, file) => acc + file.size, 0);
+                    const sizeMB = (totalSize / (1024 * 1024)).toFixed(2) + ' MB';
+
+                    setPendingFolderUpload(allFiles);
+                    setPendingFolderStats({ count: allFiles.length, size: sizeMB });
+                    setIsFolderUploadModalOpen(true);
+                }
+                return;
+            }
+        }
+
+        // Simple Drop fallback
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            const files = Array.from(e.dataTransfer.files);
+            await uploadFilesConcurrent(files, () => currentFolderId);
             fetchNodes(true);
             refreshStorage();
         }
-        // NOTE: Full folder drop support requires DataTransferItem.webkitGetAsEntry() recursion
-        // which is complex to implement robustly in one step.
-        // For "Folder Upload" via Drop, users often expect it to just work.
-        // The File Input "directory" attribute is safer for this specific request flow.
     };
 
     const navigateToFolder = (folder: StorageNode) => {
@@ -1890,6 +2137,13 @@ export default function DrivePage() {
                                                         New Text File
                                                     </button>
                                                     <button
+                                                        onClick={handleCreatePlannerClick}
+                                                        className="w-full text-left px-4 py-3 hover:bg-slate-50 text-sm font-medium text-slate-700 flex items-center gap-3 border-b border-slate-50"
+                                                    >
+                                                        <Calendar className="w-4 h-4 text-indigo-500" />
+                                                        New Planner
+                                                    </button>
+                                                    <button
                                                         onClick={() => fileInputRef.current?.click()}
                                                         className="w-full text-left px-4 py-3 hover:bg-slate-50 text-sm font-medium text-slate-700 flex items-center gap-3"
                                                     >
@@ -1929,13 +2183,40 @@ export default function DrivePage() {
 
                         {/* Content */}
                         {loading ? (
-                            <div className="flex justify-center p-20">
-                                <Loader2 className="w-10 h-10 animate-spin text-blue-600" />
+                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden z-0 relative">
+                                <table className="w-full text-left">
+                                    <thead className="bg-slate-50 border-b border-slate-100 text-xs font-semibold uppercase text-slate-500 tracking-wider">
+                                        <tr>
+                                            <th className="px-6 py-4 w-[50px]"><div className="h-4 w-4 bg-slate-200 rounded animate-pulse" /></th>
+                                            <th className="px-6 py-4"><div className="h-4 w-20 bg-slate-200 rounded animate-pulse" /></th>
+                                            <th className="px-6 py-4"><div className="h-4 w-16 bg-slate-200 rounded animate-pulse" /></th>
+                                            <th className="px-6 py-4"><div className="h-4 w-24 bg-slate-200 rounded animate-pulse" /></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {[...Array(5)].map((_, i) => (
+                                            <tr key={i}>
+                                                <td className="px-6 py-3"><div className="h-4 w-4 bg-slate-100 rounded animate-pulse" /></td>
+                                                <td className="px-6 py-3">
+                                                    <div className="flex items-center gap-4">
+                                                        <div className="w-10 h-10 bg-slate-100 rounded-lg animate-pulse" />
+                                                        <div className="space-y-2">
+                                                            <div className="h-4 w-40 bg-slate-100 rounded animate-pulse" />
+                                                            <div className="h-3 w-12 bg-slate-50 rounded animate-pulse" />
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                                <td className="px-6 py-3"><div className="h-8 w-8 rounded-full bg-slate-100 animate-pulse" /></td>
+                                                <td className="px-6 py-3"><div className="h-4 w-24 bg-slate-100 rounded animate-pulse" /></td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
                             </div>
                         ) : (
                             <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden z-0 relative">
                                 <table className="w-full text-left">
-                                    <thead className="bg-slate-50/50 border-b border-slate-100 text-xs font-semibold uppercase text-slate-500 tracking-wider">
+                                    <thead className="sticky top-0 z-30 bg-white/95 backdrop-blur-sm border-b border-slate-100 text-xs font-semibold uppercase text-slate-500 tracking-wider shadow-sm">
                                         <tr>
                                             <th className="px-6 py-4 w-[50px]">
                                                 <input
@@ -2002,11 +2283,31 @@ export default function DrivePage() {
 
                                         {nodes.length === 0 && !isCreatingFolder && (
                                             <tr>
-                                                <td colSpan={5} className="px-6 py-16 text-center">
-                                                    <div className="flex flex-col items-center justify-center text-slate-400">
-                                                        <FolderPlus className="w-12 h-12 mb-3 opacity-20" />
-                                                        <p className="text-lg font-medium text-slate-600">This folder is empty</p>
-                                                        <p className="text-sm">Drag and drop files here to upload</p>
+                                                <td colSpan={5} className="px-6 py-24 text-center">
+                                                    <div className="flex flex-col items-center justify-center">
+                                                        <div className="w-20 h-20 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mb-6 animate-in zoom-in-50 duration-300">
+                                                            <Cloud className="w-10 h-10" />
+                                                        </div>
+                                                        <h3 className="text-xl font-bold text-slate-800 mb-2">It's a bit empty here</h3>
+                                                        <p className="text-slate-500 mb-8 max-w-sm mx-auto">
+                                                            Drag and drop files directly to this page or use the button below to get started.
+                                                        </p>
+                                                        <div className="flex gap-4">
+                                                            <button
+                                                                onClick={() => fileInputRef.current?.click()}
+                                                                className="px-6 py-2.5 bg-blue-600 text-white font-medium rounded-xl hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-200 transition-all flex items-center gap-2"
+                                                            >
+                                                                <Upload className="w-4 h-4" />
+                                                                Upload Files
+                                                            </button>
+                                                            <button
+                                                                onClick={handleCreateFolderClick}
+                                                                className="px-6 py-2.5 bg-white border border-slate-200 text-slate-700 font-medium rounded-xl hover:bg-slate-50 hover:border-slate-300 transition-all flex items-center gap-2"
+                                                            >
+                                                                <FolderPlus className="w-4 h-4" />
+                                                                New Folder
+                                                            </button>
+                                                        </div>
                                                     </div>
                                                 </td>
                                             </tr>
@@ -2086,9 +2387,26 @@ export default function DrivePage() {
                                                                 <Folder className="w-5 h-5 fill-current" />
                                                             </div>
                                                         ) : (
-                                                            <div className="w-10 h-10 bg-blue-50 text-blue-600 rounded-lg flex items-center justify-center shadow-sm group-hover:bg-blue-100 group-hover:scale-105 transition-all">
-                                                                <FileText className="w-5 h-5" />
-                                                            </div>
+                                                            (() => {
+                                                                const ext = node.name.split('.').pop()?.toLowerCase() || '';
+                                                                let colorClass = "bg-blue-50 text-blue-600 group-hover:bg-blue-100";
+                                                                if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) colorClass = "bg-purple-50 text-purple-600 group-hover:bg-purple-100";
+                                                                else if (['mp4', 'webm', 'mov', 'avi'].includes(ext)) colorClass = "bg-orange-50 text-orange-600 group-hover:bg-orange-100";
+                                                                else if (['mp3', 'wav', 'ogg'].includes(ext)) colorClass = "bg-pink-50 text-pink-600 group-hover:bg-pink-100";
+                                                                else if (['pdf'].includes(ext)) colorClass = "bg-red-50 text-red-600 group-hover:bg-red-100";
+                                                                else if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) colorClass = "bg-amber-50 text-amber-600 group-hover:bg-amber-100";
+                                                                else if (['xls', 'xlsx', 'csv'].includes(ext)) colorClass = "bg-emerald-50 text-emerald-600 group-hover:bg-emerald-100";
+                                                                else if (['doc', 'docx'].includes(ext)) colorClass = "bg-blue-50 text-blue-600 group-hover:bg-blue-100";
+                                                                else if (['ppt', 'pptx'].includes(ext)) colorClass = "bg-rose-50 text-rose-600 group-hover:bg-rose-100";
+                                                                else if (['js', 'ts', 'tsx', 'jsx', 'json', 'py', 'java', 'html', 'css', 'php', 'c', 'cpp'].includes(ext)) colorClass = "bg-slate-100 text-slate-600 group-hover:bg-slate-200 border border-slate-200";
+                                                                else if (ext === 'splan') colorClass = "bg-indigo-50 text-indigo-600 group-hover:bg-indigo-100 border border-indigo-100";
+
+                                                                return (
+                                                                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm transition-all group-hover:scale-105 ${colorClass}`}>
+                                                                        {ext === 'splan' ? <Calendar className="w-5 h-5" /> : <FileText className="w-5 h-5" />}
+                                                                    </div>
+                                                                );
+                                                            })()
                                                         )}
                                                         <div>
                                                             <p className="font-medium text-slate-700 group-hover:text-blue-700 transition-colors flex items-center gap-2">
@@ -3153,81 +3471,43 @@ export default function DrivePage() {
             }
 
             {/* Delete Confirmation Overlay */}
-            {
-                itemToDelete && (
-                    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4 animate-in fade-in duration-200">
-                        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200">
-                            <div className="p-8 text-center">
-                                <div className="w-16 h-16 bg-red-50 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4 border-4 border-red-100/50">
-                                    <Trash2 className="w-8 h-8" />
-                                </div>
-                                <h3 className="text-xl font-bold text-slate-900 mb-2">Delete {itemToDelete.type === 'FOLDER' ? 'Folder' : 'File'}?</h3>
-                                <p className="text-slate-500 text-sm leading-relaxed mb-6">
-                                    Are you sure you want to delete <span className="font-bold text-slate-800">"{itemToDelete.name}"</span>?
-                                    {itemToDelete.type === 'FOLDER' && (
-                                        <span className="block mt-2 font-semibold text-red-600 text-[11px] uppercase tracking-wider">
-                                            This will also delete ALL contents!
-                                        </span>
-                                    )}
-                                    <br />
-                                    <span className="text-[10px] opacity-70 mt-2 block">This action cannot be undone.</span>
-                                </p>
-
-                                <div className="flex flex-col gap-2">
-                                    <button
-                                        onClick={confirmDeleteExecute}
-                                        className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-xl transition-all shadow-lg shadow-red-200 flex items-center justify-center gap-2"
-                                    >
-                                        Delete Permanently
-                                    </button>
-                                    <button
-                                        onClick={() => setItemToDelete(null)}
-                                        className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-3 rounded-xl transition-all"
-                                    >
-                                        Cancel
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                )
-            }
+            <ConfirmModal
+                isOpen={!!itemToDelete}
+                onClose={() => setItemToDelete(null)}
+                onConfirm={confirmDeleteExecute}
+                title={`Delete ${itemToDelete?.type === 'FOLDER' ? 'Folder' : 'File'}?`}
+                description={
+                    <>
+                        Are you sure you want to delete <span className="font-bold text-slate-800">"{itemToDelete?.name}"</span>?
+                        {itemToDelete?.type === 'FOLDER' && (
+                            <span className="block mt-2 font-semibold text-red-600 text-[11px] uppercase tracking-wider">
+                                This will also delete ALL contents!
+                            </span>
+                        )}
+                        <br />
+                        <span className="text-[10px] opacity-70 mt-2 block">This action cannot be undone.</span>
+                    </>
+                }
+                confirmText="Delete Permanently"
+                isDanger
+            />
 
             {/* Rollback Confirmation Overlay */}
-            {
-                pendingRollback && (
-                    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4 animate-in fade-in duration-200">
-                        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200">
-                            <div className="p-8 text-center">
-                                <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-4 border-4 border-blue-100/50">
-                                    <RotateCcw className="w-8 h-8" />
-                                </div>
-                                <h3 className="text-xl font-bold text-slate-900 mb-2">Confirm Rollback</h3>
-                                <p className="text-slate-500 text-sm leading-relaxed mb-6">
-                                    Are you sure you want to restore <span className="font-bold text-slate-800">"{selectedHistoryNode?.name}"</span> to <span className="text-blue-600 font-bold underline">version {pendingRollback.version}</span>?
-                                    <br />
-                                    <span className="text-[10px] opacity-70 mt-2 block">(This will create a new version copy)</span>
-                                </p>
-
-                                <div className="flex flex-col gap-2">
-                                    <button
-                                        onClick={confirmRollbackExecute}
-                                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition-all shadow-lg shadow-blue-200 flex items-center justify-center gap-2"
-                                    >
-                                        Confirm Restore
-                                    </button>
-                                    <button
-                                        onClick={() => setPendingRollback(null)}
-                                        className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-3 rounded-xl transition-all"
-                                    >
-                                        Cancel
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                )
-            }
+            <ConfirmModal
+                isOpen={!!pendingRollback}
+                onClose={() => setPendingRollback(null)}
+                onConfirm={confirmRollbackExecute}
+                title="Confirm Rollback"
+                description={
+                    <>
+                        Are you sure you want to restore <span className="font-bold text-slate-800">"{selectedHistoryNode?.name}"</span> to <span className="text-blue-600 font-bold underline">version {pendingRollback?.version}</span>?
+                        <br />
+                        <span className="text-[10px] opacity-70 mt-2 block">(This will create a new version copy)</span>
+                    </>
+                }
+                confirmText="Confirm Restore"
+                isDanger={false}
+            />
             {/* Create Note Modal */}
             <CreateNoteModal
                 isOpen={isCreateNoteModalOpen}
@@ -3262,6 +3542,25 @@ export default function DrivePage() {
                 isOpen={isInfoPanelOpen}
                 onClose={() => setIsInfoPanelOpen(false)}
             />
-        </div >
+
+            {/* Planner Editor */}
+            <PlannerEditor
+                isOpen={plannerState.isOpen}
+                onClose={() => setPlannerState({ isOpen: false, file: null, content: null })}
+                initialData={plannerState.content}
+                fileName={plannerState.file?.name || ''}
+                onSave={handleSavePlanner}
+            />
+
+            <InputModal
+                isOpen={isCreatePlannerModalOpen}
+                onClose={() => setIsCreatePlannerModalOpen(false)}
+                onSubmit={handleCreatePlannerSubmit}
+                title="Create New Planner"
+                description="Enter a name for your new project plan."
+                placeholder="Ex. Project Alpha Plan"
+                confirmText="Create Plan"
+            />
+        </div>
     );
 }

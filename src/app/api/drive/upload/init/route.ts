@@ -14,10 +14,6 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    // Check Whitelist
-    const { data: whitelistData } = await supabase.from('whitelist').select('email').eq('email', user.email).single();
-    if (!whitelistData) return NextResponse.json({ error: 'Access Denied' }, { status: 403 });
-
     try {
         const body = await request.json();
         const {
@@ -33,24 +29,42 @@ export async function POST(request: NextRequest) {
         if (!filename) return NextResponse.json({ error: 'Filename is required' }, { status: 400 });
         if (!projectId) return NextResponse.json({ error: 'Project context required' }, { status: 400 });
 
-        // Resolve Project ID
-        let resolvedProjectId = projectId;
+        // [Performance] Parallelize Initial Lookups
         const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId);
 
-        if (!isUUID) {
-            const { data: projs } = await supabase.from('projects').select('id').eq('name', decodeURIComponent(projectId)).limit(1);
-            if (projs && projs.length > 0) resolvedProjectId = projs[0].id;
-            else return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+        const whitelistPromise = supabase.from('whitelist').select('email, role').eq('email', user.email).single();
+
+        let projectPromise;
+        if (isUUID) {
+            projectPromise = supabase
+                .from('projects')
+                .select('id, name, max_storage_bytes, current_storage_bytes, settings')
+                .eq('id', projectId)
+                .single();
+        } else {
+            projectPromise = supabase
+                .from('projects')
+                .select('id, name, max_storage_bytes, current_storage_bytes, settings')
+                .eq('name', decodeURIComponent(projectId))
+                .maybeSingle();
         }
 
+        const [whitelistRes, projectRes] = await Promise.all([whitelistPromise, projectPromise]);
+
+        const whitelistData = whitelistRes.data;
+        if (!whitelistData) return NextResponse.json({ error: 'Access Denied' }, { status: 403 });
+
+        const project = projectRes.data;
+        if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+
+        const resolvedProjectId = project.id;
+
         // --- READ ONLY CHECK ---
-        const { data: projectData } = await supabase.from('projects').select('settings').eq('id', resolvedProjectId).single();
-        const { data: userRole } = await supabase.from('whitelist').select('role').eq('email', user.email).single();
-        if (projectData?.settings?.read_only && userRole?.role !== 'admin') {
+        if (project.settings?.read_only && whitelistData.role !== 'admin') {
             return NextResponse.json({ error: 'This project is in Read-Only mode.' }, { status: 403 });
         }
 
-        // --- CONFLICT CHECK ---
+        // [Performance] Parallelize Conflict Check & Folder Path
         let existingNodeQuery = supabase
             .from('storage_nodes')
             .select('*')
@@ -61,12 +75,23 @@ export async function POST(request: NextRequest) {
         if (parentId && parentId !== 'null') existingNodeQuery = existingNodeQuery.eq('parent_id', parentId);
         else existingNodeQuery = existingNodeQuery.is('parent_id', null);
 
-        const { data: existingNodes } = await existingNodeQuery.order('version', { ascending: false });
+        const conflictPromise = existingNodeQuery.order('version', { ascending: false });
+
+        let folderPathPromise;
+        if (parentId && parentId !== 'null') {
+            folderPathPromise = supabase.rpc('get_folder_path', { folder_id: parentId });
+        } else {
+            folderPathPromise = Promise.resolve({ data: [] });
+        }
+
+        const [conflictRes, folderPathRes] = await Promise.all([conflictPromise, folderPathPromise]);
+
+        const existingNodes = conflictRes.data;
         const latestNode = existingNodes?.[0];
 
+        // --- CONFLICT HANDLING ---
         if (latestNode && !resolution) {
-            const { data: whitelistUser } = await supabase.from('whitelist').select('role').eq('email', user.email).single();
-            const isAdmin = whitelistUser?.role === 'admin';
+            const isAdmin = whitelistData.role === 'admin';
             const isOwner = latestNode.created_by === user.id || latestNode.owner_email === user.email;
 
             return NextResponse.json({
@@ -89,8 +114,7 @@ export async function POST(request: NextRequest) {
             if (resolution === 'update') {
                 targetVersion = (latestNode.version || 1) + 1;
             } else if (resolution === 'overwrite') {
-                const { data: whitelistUser } = await supabase.from('whitelist').select('role').eq('email', user.email).single();
-                const isAdmin = whitelistUser?.role === 'admin';
+                const isAdmin = whitelistData.role === 'admin';
                 const isOwner = latestNode.created_by === user.id || latestNode.owner_email === user.email;
 
                 if (!isAdmin && !isOwner) {
@@ -101,15 +125,6 @@ export async function POST(request: NextRequest) {
             }
         }
 
-        // Fetch Project for quota
-        const { data: project, error: projError } = await supabase
-            .from('projects')
-            .select('id, name, max_storage_bytes, current_storage_bytes')
-            .eq('id', resolvedProjectId)
-            .single();
-
-        if (projError || !project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
-
         // Adjust Quota check
         const sizeDiff = overwriteNodeId ? (fileSize - (latestNode.size || 0)) : fileSize;
 
@@ -117,13 +132,11 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ error: `Storage Limit Exceeded! Max: ${(project.max_storage_bytes / 1073741824).toFixed(2)} GB` }, { status: 403 });
         }
 
-        // Get folder path
+        // Get folder path string
         let folderPath = "";
-        if (parentId && parentId !== 'null') {
-            const { data: pathNodes } = await supabase.rpc('get_folder_path', { folder_id: parentId });
-            if (pathNodes && Array.isArray(pathNodes)) {
-                folderPath = [...pathNodes].reverse().map((n: any) => n.name).join('/') + '/';
-            }
+        const pathNodes = folderPathRes.data;
+        if (pathNodes && Array.isArray(pathNodes) && pathNodes.length > 0) {
+            folderPath = [...pathNodes].reverse().map((n: any) => n.name).join('/') + '/';
         }
 
         // 1. Generate R2 Key
