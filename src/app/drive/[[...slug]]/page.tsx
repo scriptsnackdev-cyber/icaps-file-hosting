@@ -1011,121 +1011,117 @@ export default function DrivePage() {
         const cleanName = file.name.split('/').pop()?.split('\\').pop() || file.name;
         const taskId = existingTaskId || addTask('UPLOAD', cleanName);
 
-        try {
-            // STEP 1: INITIALIZE (Get Presigned URL)
-            const initRes = await fetch('/api/drive/upload/init', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    filename: cleanName,
-                    fileSize: file.size,
-                    fileType: file.type,
-                    parentId,
-                    projectId: currentProject?.id,
-                    resolution,
-                    silent
-                })
-            });
-
-            if (initRes.status === 409) {
-                const data = await initRes.json();
-                setConflictInfo({ file, parentId, taskId, data: (data as any).existing });
-                return 'CONFLICT';
-            }
-
-            if (!initRes.ok) {
-                const err = await initRes.json();
-                showToast(err.error || 'Upload initialization failed', 'error');
-                updateTask(taskId, 'ERROR');
-                return 'ERROR';
-            }
-
-            const initData = await initRes.json();
-            const { url, key, resolvedProjectId } = initData;
-
-            // STEP 2: UPLOAD DIRECTLY TO R2
-            return new Promise((resolve) => {
-                const xhr = new XMLHttpRequest();
-
-                if (abortControllerRef.current) {
-                    abortControllerRef.current.signal.addEventListener('abort', () => {
-                        xhr.abort();
-                    });
-                }
-
-                xhr.open('PUT', url, true);
-                if (file.type) xhr.setRequestHeader('Content-Type', file.type);
-
-                xhr.upload.onprogress = (event) => {
-                    if (event.lengthComputable) {
-                        filesProgressRef.current.set(taskId, event.loaded);
-                        updateGlobalProgress();
+        // --- Proxy Fallback Strategy ---
+        const doProxyUpload = async (): Promise<'SUCCESS' | 'CONFLICT' | 'ERROR' | 'CANCELLED'> => {
+            try {
+                // Use XMLHttpRequest for Progress
+                return new Promise((resolve) => {
+                    const xhr = new XMLHttpRequest();
+                    if (abortControllerRef.current) {
+                        abortControllerRef.current.signal.addEventListener('abort', () => xhr.abort());
                     }
-                };
 
-                xhr.onload = async () => {
-                    if (xhr.status >= 200 && xhr.status < 300) {
-                        // STEP 3: COMPLETE (Finalize DB)
-                        try {
-                            const completeRes = await fetch('/api/drive/upload/complete', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    key,
-                                    filename: cleanName,
-                                    size: file.size,
-                                    type: file.type,
-                                    projectId: resolvedProjectId,
-                                    parentId,
-                                    resolution,
-                                    silent
-                                })
-                            });
+                    xhr.open('POST', '/api/drive/upload/proxy', true);
 
-                            if (completeRes.ok) {
-                                filesProgressRef.current.set(taskId, file.size);
-                                updateGlobalProgress();
-                                updateTask(taskId, 'SUCCESS');
-                                if (!silent) {
-                                    fetchNodes(true);
-                                    refreshStorage();
+                    // Pass metadata in headers to avoid FormData parsing overhead/errors
+                    xhr.setRequestHeader('x-filename', encodeURIComponent(cleanName));
+                    xhr.setRequestHeader('x-parent-id', parentId || 'null');
+                    if (currentProject) xhr.setRequestHeader('x-project-id', currentProject.id);
+                    xhr.setRequestHeader('x-skip-db', 'true');
+                    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+
+                    xhr.upload.onprogress = (event) => {
+                        if (event.lengthComputable) {
+                            filesProgressRef.current.set(taskId, event.loaded);
+                            updateGlobalProgress();
+                        }
+                    };
+
+                    xhr.onload = async () => {
+                        if (xhr.status >= 200 && xhr.status < 300) {
+                            try {
+                                const res = JSON.parse(xhr.responseText);
+                                if (res.error) throw new Error(res.error);
+
+                                // Step 2: Complete via API
+                                const completeRes = await fetch('/api/drive/upload/complete', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        key: res.key,
+                                        filename: cleanName,
+                                        size: file.size,
+                                        type: res.type,
+                                        projectId: res.projectId,
+                                        parentId,
+                                        resolution,
+                                        silent
+                                    })
+                                });
+
+                                if (completeRes.ok) {
+                                    filesProgressRef.current.set(taskId, file.size);
+                                    updateGlobalProgress();
+                                    updateTask(taskId, 'SUCCESS');
+                                    if (!silent) {
+                                        fetchNodes(true);
+                                        refreshStorage();
+                                    }
+                                    resolve('SUCCESS');
+                                } else {
+                                    const err = await completeRes.json();
+                                    console.error('Completion error:', err);
+                                    updateTask(taskId, 'ERROR');
+                                    resolve('ERROR');
                                 }
-                                resolve('SUCCESS');
-                            } else {
-                                const err = await completeRes.json();
-                                console.error('Completion error:', err);
+                            } catch (e) {
+                                console.error('Proxy completion processing failed:', e);
                                 updateTask(taskId, 'ERROR');
                                 resolve('ERROR');
                             }
-                        } catch (e) {
-                            console.error('Completion fetch error:', e);
+                        } else {
+                            console.error('Proxy upload failed status:', xhr.status);
+                            try {
+                                console.error('Proxy Error Details:', JSON.parse(xhr.responseText));
+                            } catch (e) {
+                                console.error('Proxy Error Text:', xhr.responseText);
+                            }
                             updateTask(taskId, 'ERROR');
                             resolve('ERROR');
                         }
-                    } else {
+                    };
+
+                    xhr.onerror = () => {
+                        console.error('Proxy upload network error');
                         updateTask(taskId, 'ERROR');
                         resolve('ERROR');
-                    }
-                };
+                    };
 
-                xhr.onerror = () => {
-                    updateTask(taskId, 'ERROR');
-                    resolve('ERROR');
-                };
+                    xhr.onabort = () => {
+                        updateTask(taskId, 'CANCELLED');
+                        resolve('CANCELLED');
+                    };
 
-                xhr.onabort = () => {
-                    updateTask(taskId, 'CANCELLED');
-                    resolve('CANCELLED');
-                };
+                    xhr.send(file);
+                });
+            } catch (e) {
+                console.error("Proxy upload exception:", e);
+                updateTask(taskId, 'ERROR');
+                return 'ERROR';
+            }
+        };
 
-                xhr.send(file);
-            });
+        // [CORS Fix] Always use Proxy Upload to avoid R2 CORS issues entirely.
+        // This removes the "Direct Upload" system as requested by the user.
+        return doProxyUpload();
 
-        } catch (e) {
-            console.error(e);
-            updateTask(taskId, 'ERROR');
-            return 'ERROR';
-        }
+        /* Legacy Direct Upload Code - Removed for Stability
+        try {
+            // STEP 1: INITIALIZE (Get Presigned URL)
+            const initRes = await fetch('/api/drive/upload/init', { ... }); 
+             ... 
+        } ...
+        */
     };
 
     const uploadFile = async (file: File) => {

@@ -4,6 +4,8 @@ import { r2, R2_BUCKET_NAME } from '@/lib/r2';
 import { createClient } from '@/utils/supabase/server';
 import { v4 as uuidv4 } from 'uuid';
 
+
+
 export async function POST(request: NextRequest) {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
@@ -13,15 +15,18 @@ export async function POST(request: NextRequest) {
     }
 
     try {
-        const formData = await request.formData();
-        const file = formData.get('file') as File;
-        const parentId = formData.get('parentId') as string;
-        const projectId = formData.get('projectId') as string;
-        let filename = formData.get('filename') as string || file.name;
+        // Read Metadata from Headers
+        const rawFilename = request.headers.get('x-filename');
+        const parentId = request.headers.get('x-parent-id');
+        const projectId = request.headers.get('x-project-id');
+        const skipDb = request.headers.get('x-skip-db') === 'true';
+        const contentType = request.headers.get('content-type') || 'application/octet-stream';
 
-        if (!file || !projectId) {
-            return NextResponse.json({ error: 'Missing Required Fields' }, { status: 400 });
+        if (!rawFilename || !projectId) {
+            return NextResponse.json({ error: 'Missing Required Headers (x-filename, x-project-id)' }, { status: 400 });
         }
+
+        const filename = decodeURIComponent(rawFilename);
 
         // 1. Get Project & Path Info
         const { data: project } = await supabase.from('projects')
@@ -44,16 +49,37 @@ export async function POST(request: NextRequest) {
         const uniqueKey = `projects/${safeProjectName}/${folderPath}${uniquePrefix}_v1_${filename}`;
 
         // 3. Upload to R2 (Server-side upload)
-        const buffer = Buffer.from(await file.arrayBuffer());
+        // Read raw body
+        const arrayBuffer = await request.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
 
-        await r2.send(new PutObjectCommand({
-            Bucket: R2_BUCKET_NAME,
-            Key: uniqueKey,
-            Body: buffer,
-            ContentType: 'text/plain' // Force simple text
-        }));
+        console.log(`[Proxy] Uploading to R2: Bucket=${R2_BUCKET_NAME}, Key=${uniqueKey}, Size=${buffer.length}`);
 
-        // 4. Insert into DB
+        try {
+            await r2.send(new PutObjectCommand({
+                Bucket: R2_BUCKET_NAME,
+                Key: uniqueKey,
+                Body: buffer,
+                ContentType: contentType
+            }));
+            console.log(`[Proxy] R2 Upload Success: ${uniqueKey}`);
+        } catch (r2Error: any) {
+            console.error(`[Proxy] R2 Upload FAILED: Bucket=${R2_BUCKET_NAME}, Key=${uniqueKey}`, r2Error);
+            throw new Error(`R2 Upload Failed: ${r2Error.message}`);
+        }
+
+        if (skipDb) {
+            return NextResponse.json({
+                success: true,
+                key: uniqueKey,
+                size: buffer.length,
+                type: contentType,
+                filename: filename,
+                projectId: project.id // Return resolved project ID
+            });
+        }
+
+        // 4. Insert into DB (Legacy / Planner mode)
         // Check if updating existing
         const { data: existing } = await supabase.from('storage_nodes')
             .select('id, version')
@@ -67,7 +93,7 @@ export async function POST(request: NextRequest) {
             // Update
             await supabase.from('storage_nodes').update({
                 r2_key: uniqueKey,
-                size: file.size,
+                size: buffer.length,
                 updated_at: new Date().toISOString(),
                 version: (existing.version || 1) + 1
             }).eq('id', existing.id);
@@ -79,8 +105,8 @@ export async function POST(request: NextRequest) {
                 parent_id: parentId === 'null' ? null : parentId,
                 project_id: project.id,
                 r2_key: uniqueKey,
-                size: file.size,
-                mime_type: 'text/plain',
+                size: buffer.length,
+                mime_type: contentType,
                 created_by: user.id,
                 owner_email: user.email,
                 sharing_scope: 'PRIVATE',
@@ -91,7 +117,11 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ success: true });
 
     } catch (error: any) {
-        console.error('Proxy Upload Error:', error);
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        console.error('Proxy Upload Global Error:', error);
+        return NextResponse.json({
+            error: error.message || 'Internal Server Error',
+            stack: error.stack,
+            details: JSON.stringify(error)
+        }, { status: 500 });
     }
 }
