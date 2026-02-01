@@ -213,12 +213,15 @@ export async function POST(request: NextRequest) {
 
         // 6. Access Log (Background)
         postProcessTasks.push(
-            supabase.from('access_logs').insert({
-                user_email: user.email,
-                action: 'UPLOAD',
-                file_key: key,
-                details: `Project: ${project.name} (${projectId})`
-            }).catch(e => console.error("Logging Error", e))
+            (async () => {
+                const { error } = await supabase.from('access_logs').insert({
+                    user_email: user.email,
+                    action: 'UPLOAD',
+                    file_key: key,
+                    details: `Project: ${project.name} (${projectId})`
+                });
+                if (error) console.error("Logging Error", error);
+            })()
         );
 
         // Execute background tasks mostly in parallel but we want to return fast
