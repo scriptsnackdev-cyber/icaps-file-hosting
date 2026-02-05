@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { createClient } from '@/utils/supabase/client';
+import { CACHE_KEYS } from '@/constants/cacheKeys';
 
 interface AuthContextType {
     isAdmin: boolean;
@@ -27,8 +28,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (user) {
             setUserEmail(user.email || null);
             setUserId(user.id);
-            localStorage.setItem('auth_user_email', user.email || '');
-            localStorage.setItem('auth_user_id', user.id);
+            localStorage.setItem(CACHE_KEYS.AUTH_EMAIL, user.email || '');
+            localStorage.setItem(CACHE_KEYS.AUTH_ID, user.id);
 
             const { data } = await supabase
                 .from('whitelist')
@@ -38,14 +39,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
             const adminStatus = data?.role === 'admin';
             setIsAdmin(adminStatus);
-            localStorage.setItem('auth_is_admin', adminStatus.toString());
+            localStorage.setItem(CACHE_KEYS.AUTH_ADMIN, adminStatus.toString());
         } else {
             setIsAdmin(false);
             setUserEmail(null);
             setUserId(null);
-            localStorage.removeItem('auth_is_admin');
-            localStorage.removeItem('auth_user_email');
-            localStorage.removeItem('auth_user_id');
+            localStorage.removeItem(CACHE_KEYS.AUTH_ADMIN);
+            localStorage.removeItem(CACHE_KEYS.AUTH_EMAIL);
+            localStorage.removeItem(CACHE_KEYS.AUTH_ID);
         }
         setLoading(false);
     }, []);
@@ -53,9 +54,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     useEffect(() => {
         // Initial load from localStorage for instant UI
         if (typeof window !== 'undefined') {
-            const cachedAdmin = localStorage.getItem('auth_is_admin');
-            const cachedEmail = localStorage.getItem('auth_user_email');
-            const cachedId = localStorage.getItem('auth_user_id');
+            const cachedAdmin = localStorage.getItem(CACHE_KEYS.AUTH_ADMIN);
+            const cachedEmail = localStorage.getItem(CACHE_KEYS.AUTH_EMAIL);
+            const cachedId = localStorage.getItem(CACHE_KEYS.AUTH_ID);
             if (cachedAdmin === 'true') setIsAdmin(true);
             if (cachedEmail) setUserEmail(cachedEmail);
             if (cachedId) setUserId(cachedId);
@@ -76,9 +77,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 setUserEmail(null);
                 setUserId(null);
                 setLoading(false);
-                localStorage.removeItem('auth_is_admin');
-                localStorage.removeItem('auth_user_email');
-                localStorage.removeItem('auth_user_id');
+                localStorage.removeItem(CACHE_KEYS.AUTH_ADMIN);
+                localStorage.removeItem(CACHE_KEYS.AUTH_EMAIL);
+                localStorage.removeItem(CACHE_KEYS.AUTH_ID);
                 // Optional: Redirect if needed, but Page usually handles redirect on !user
             }
         });
@@ -93,8 +94,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await supabase.auth.signOut();
         setIsAdmin(false);
         setUserEmail(null);
-        localStorage.removeItem('auth_is_admin');
-        localStorage.removeItem('auth_user_email');
+        localStorage.removeItem(CACHE_KEYS.AUTH_ADMIN);
+        localStorage.removeItem(CACHE_KEYS.AUTH_EMAIL);
         window.location.href = '/login';
     };
 

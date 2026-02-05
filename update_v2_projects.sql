@@ -37,3 +37,13 @@ ALTER TABLE project_members ENABLE ROW LEVEL SECURITY;
 
 -- Note: 'auth.email()' needs to be available or you might need to join with auth.users if using UUID
 -- For simplicity in this script, we assume application-level checks or standard Supabase auth policies.
+
+-- 6. Fix for Multi-Project Membership
+-- Ensure we don't have a unique constraint on user_email alone (which prevents user from joining multiple projects)
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'project_members_user_email_key') THEN
+        ALTER TABLE project_members DROP CONSTRAINT project_members_user_email_key;
+    END IF;
+END $$;
+

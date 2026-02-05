@@ -6,6 +6,7 @@ import { useRouter, usePathname } from 'next/navigation';
 
 import { useStorage } from '@/contexts/StorageContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { useActionContext } from '@/contexts/ActionContext';
 
 function formatBytes(bytes: number, decimals = 2) {
     if (!+bytes) return '0 Bytes';
@@ -21,43 +22,8 @@ export function Sidebar() {
     const pathname = usePathname();
     const { totalSize } = useStorage();
     const { isAdmin, userEmail, signOut } = useAuth();
-    const [projects, setProjects] = useState<any[]>([]);
-    const [isLoading, setIsLoading] = useState(true);
+    const { projects, projectsLoading } = useActionContext();
     const [isSignOutModalOpen, setIsSignOutModalOpen] = useState(false);
-
-    useEffect(() => {
-        const loadProjects = async () => {
-            // Try to load from cache first
-            if (typeof window !== 'undefined') {
-                const cached = localStorage.getItem('sidebar_projects');
-                if (cached) {
-                    try {
-                        const parsed = JSON.parse(cached);
-                        setProjects(parsed);
-                        if (parsed.length > 0) setIsLoading(false);
-                    } catch (e) {
-                        console.error("Failed to parse cached projects", e);
-                    }
-                }
-            }
-
-            try {
-                const res = await fetch('/api/projects');
-                if (res.ok) {
-                    const data = await res.json();
-                    setProjects(data);
-                    if (typeof window !== 'undefined') {
-                        localStorage.setItem('sidebar_projects', JSON.stringify(data));
-                    }
-                }
-            } catch (err) {
-                console.error("Failed to fetch projects for sidebar", err);
-            } finally {
-                setIsLoading(false);
-            }
-        };
-        loadProjects();
-    }, []);
 
     const navItems = [
         { icon: FolderOpen, label: 'My Files', path: '/drive' },
@@ -98,7 +64,8 @@ export function Sidebar() {
                         Projects
                     </div>
                     <div className="space-y-1">
-                        {isLoading && projects.length === 0 ? (
+                        {/* We use projects.length === 0 as loading indicator if we don't have cache yet */}
+                        {projects.length === 0 && projectsLoading ? (
                             <div className="px-3 py-2 space-y-2">
                                 <div className="h-8 bg-slate-50 rounded-lg animate-pulse" />
                                 <div className="h-8 bg-slate-50 rounded-lg animate-pulse" />

@@ -19,6 +19,9 @@ import { TaskProgress, AsyncTask } from '@/components/TaskProgress';
 import { v4 as uuidv4 } from 'uuid';
 import { useToast } from '@/contexts/ToastContext';
 import { useStorage } from '@/contexts/StorageContext';
+import { useActionContext } from '@/contexts/ActionContext';
+import { useActionCache } from '@/hooks/useActionCache';
+import { CACHE_KEYS } from '@/constants/cacheKeys';
 
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -41,12 +44,13 @@ export default function DrivePage() {
     const folderPath = React.useMemo(() => slug?.slice(1) || [], [slugKey]); // Use slugKey for stability
     const folderPathKey = folderPath.join('/');
 
-    const [projects, setProjects] = useState<Project[]>([]);
+    const { projects, projectsLoading, refreshProjects } = useActionContext();
     const [currentProject, setCurrentProject] = useState<Project | null>(null);
-    const [nodes, setNodes] = useState<StorageNode[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
-    const [folderChain, setFolderChain] = useState<{ id: string, name: string }[]>([]);
+    // Derived values from cache
+    // const [nodes, setNodes] = useState<StorageNode[]>([]); // Removed
+    // const [loading, setLoading] = useState(true); // Removed
+    // const [currentFolderId, setCurrentFolderId] = useState<string | null>(null); // Removed
+    // const [folderChain, setFolderChain] = useState<{ id: string, name: string }[]>([]); // Removed
 
     // New Actions State
     const [isMoveToModalOpen, setIsMoveToModalOpen] = useState(false);
@@ -55,46 +59,62 @@ export default function DrivePage() {
     const [infoPanelNode, setInfoPanelNode] = useState<StorageNode | null>(null);
 
     // Hydrate from localStorage
-    useEffect(() => {
-        const savedProjects = localStorage.getItem('cache_projects');
-        if (savedProjects) {
-            try {
-                setProjects(JSON.parse(savedProjects));
-            } catch (e) {
-                console.error('Failed to parse cached projects', e);
-            }
+    // Unified Fetcher for useActionCache
+    const fetchFolderData = useCallback(async () => {
+        if (!urlProjectId) return null;
+        let url = `/api/drive?project=${encodeURIComponent(urlProjectId)}`;
+        if (folderPath && folderPath.length > 0) {
+            url += `&path=${folderPath.map(s => encodeURIComponent(s)).join('/')}`;
         }
-    }, []);
-
-    useEffect(() => {
-        const savedProject = localStorage.getItem(`cache_project_${urlProjectId}`);
-        if (savedProject) {
-            try {
-                setCurrentProject(JSON.parse(savedProject));
-            } catch (e) {
-                console.error('Failed to parse cached project', e);
-            }
-        }
-
-        const cacheKey = `cache_nodes_${urlProjectId}_${folderPathKey}`;
-        const savedNodes = localStorage.getItem(cacheKey);
-        if (savedNodes) {
-            try {
-                setNodes(JSON.parse(savedNodes));
-                // Instant load!
-                setLoading(false);
-            } catch (e) {
-                console.error('Failed to parse cached nodes', e);
-                // Fallback to loader
-                setNodes([]);
-                setLoading(true);
-            }
-        } else {
-            // Navigation to new path without cache: Show loader
-            setNodes([]);
-            setLoading(true);
-        }
+        const res = await fetch(url);
+        if (res.status === 404) throw new Error('NOT_FOUND');
+        if (!res.ok) throw new Error('Failed to load');
+        return await res.json();
     }, [urlProjectId, folderPathKey]);
+
+    const {
+        data: folderData,
+        loading: folderLoading,
+        refresh: refreshFolder
+    } = useActionCache<any>(
+        CACHE_KEYS.NODES(urlProjectId || '', folderPathKey),
+        fetchFolderData,
+        {
+            persist: true,
+            onError: (err) => {
+                if (err.message === 'NOT_FOUND') {
+                    showToast('Folder not found', 'error');
+                    router.push('/drive');
+                }
+            }
+        }
+    );
+
+    const nodes: StorageNode[] = React.useMemo(() => folderData?.nodes || [], [folderData]);
+    const currentFolderId = folderData?.currentFolderId || null;
+    const folderChain = React.useMemo(() => folderData?.breadcrumbs || [], [folderData]);
+    const loading = folderLoading && !folderData;
+
+    // Sync Current Project state separately (as it persists across folder changes)
+    useEffect(() => {
+        // Try load from cache first
+        if (!currentProject && urlProjectId) {
+            const cached = localStorage.getItem(CACHE_KEYS.PROJECT_DETAILS(urlProjectId));
+            if (cached) {
+                try { setCurrentProject(JSON.parse(cached)); } catch (e) { }
+            }
+        }
+
+        if (folderData?.project) {
+            setCurrentProject(folderData.project);
+            localStorage.setItem(CACHE_KEYS.PROJECT_DETAILS(urlProjectId || ''), JSON.stringify(folderData.project));
+        }
+    }, [folderData, urlProjectId]);
+
+    // Shim for existing codebase calling "fetchNodes"
+    const fetchNodes = useCallback(async (force = false, silent = false) => {
+        await refreshFolder(silent);
+    }, [refreshFolder]);
 
 
     const breadcrumbsToRender = React.useMemo(() => {
@@ -140,6 +160,7 @@ export default function DrivePage() {
     const [newProjectQuota, setNewProjectQuota] = useState(100); // GB
     const [newProjectMembers, setNewProjectMembers] = useState<string[]>([]);
     const [whitelist, setWhitelist] = useState<string[]>([]);
+    const [isLoadingWhitelist, setIsLoadingWhitelist] = useState(true);
     const [conflictInfo, setConflictInfo] = useState<{
         file: File,
         parentId: string | null,
@@ -619,131 +640,24 @@ export default function DrivePage() {
 
     useEffect(() => {
         const fetchWhitelist = async () => {
-            const { data } = await supabase.from('whitelist').select('email').order('email');
-            if (data) setWhitelist(data.map(u => u.email));
+            try {
+                const { data } = await supabase.from('whitelist').select('email').order('email');
+                if (data) setWhitelist(data.map(u => u.email));
+            } catch (error) {
+                console.error("Error fetching whitelist:", error);
+            } finally {
+                setIsLoadingWhitelist(false);
+            }
         };
         fetchWhitelist();
     }, []);
 
     const supabase = createClient();
 
-    const fetchProjects = useCallback(async () => {
-        try {
-            const res = await fetch('/api/projects');
-            if (res.ok) {
-                const data = await res.json();
-                setProjects(data);
-                localStorage.setItem('cache_projects', JSON.stringify(data));
-            }
-        } catch (error) {
-            console.error(error);
-        }
-    }, []);
+    // fetchProjects removed (handled by Context)
+    // fetchNodes shim defined above
 
-    useEffect(() => {
-        fetchProjects();
-    }, [fetchProjects]);
-
-    const lastFetchedRef = useRef<string>("");
-
-    const fetchNodes = useCallback(async (force: boolean = false, silent: boolean = false) => {
-        const projectIdToUse = urlProjectId;
-        const currentFetchKey = `${projectIdToUse}-${folderPathKey}`;
-
-        if (!projectIdToUse) {
-            setLoading(false);
-            return;
-        }
-
-        // Only fetch if something actually changed.
-        if (!force && lastFetchedRef.current === currentFetchKey) {
-            return;
-        }
-
-        lastFetchedRef.current = currentFetchKey;
-
-        // Try to load from cache immediately to prevent spinner
-        let hasCachedData = false;
-        if (!force && typeof window !== 'undefined') {
-            const cacheKey = `cache_nodes_${projectIdToUse}_${folderPathKey}`;
-            const cached = localStorage.getItem(cacheKey);
-            if (cached) {
-                try {
-                    const parsed = JSON.parse(cached);
-                    setNodes(parsed);
-                    hasCachedData = true;
-                } catch (e) {
-                    console.error("Failed to parse cached nodes", e);
-                }
-            }
-        }
-
-        if (!hasCachedData && !silent) {
-            setLoading(true);
-        }
-
-        try {
-            let url = `/api/drive?project=${encodeURIComponent(projectIdToUse)}`;
-            if (folderPath && folderPath.length > 0) {
-                const path = folderPath.map(s => encodeURIComponent(s)).join('/');
-                url += `&path=${path}`;
-            }
-
-            const res = await fetch(url);
-
-            // Safety: If URL changed while we were fetching, ignore this result
-            if (lastFetchedRef.current !== currentFetchKey) return;
-
-            if (res.status === 404) {
-                if (!silent) {
-                    showToast('Folder not found', 'error');
-                    router.push('/drive');
-                }
-                return;
-            }
-            if (!res.ok) throw new Error('Failed to load');
-
-            const data = await res.json();
-            // Compare if we need to update state to avoid re-renders (simple length/id check)
-            setNodes(prev => {
-                const newNodes = data.nodes || [];
-                if (JSON.stringify(prev) === JSON.stringify(newNodes)) return prev;
-                return newNodes;
-            });
-
-            if (!silent) {
-                setCurrentFolderId(data.currentFolderId);
-                setFolderChain(data.breadcrumbs || []);
-            } else {
-                // Determine if we need to update these
-                setCurrentFolderId(prev => prev !== data.currentFolderId ? data.currentFolderId : prev);
-                // Breadcrumbs usually don't change while polling same path, but good to be safe
-                setFolderChain(prev => JSON.stringify(prev) === JSON.stringify(data.breadcrumbs) ? prev : (data.breadcrumbs || []));
-            }
-
-            // Cache current state
-            localStorage.setItem(`cache_nodes_${urlProjectId}_${folderPathKey}`, JSON.stringify(data.nodes || []));
-
-            if (data.project) {
-                localStorage.setItem(`cache_project_${urlProjectId}`, JSON.stringify(data.project));
-                setCurrentProject(prev => {
-                    const hasChanged = !prev ||
-                        prev.id !== data.project.id ||
-                        prev.current_storage_bytes !== data.project.current_storage_bytes ||
-                        prev.name !== data.project.name;
-                    return hasChanged ? data.project : prev;
-                });
-            }
-
-        } catch (e) {
-            if (!silent) console.error("fetchNodes error:", e);
-        } finally {
-            // Safety: Only set loading false if this is still the current request
-            if (lastFetchedRef.current === currentFetchKey && !silent) {
-                setLoading(false);
-            }
-        }
-    }, [urlProjectId, folderPathKey, router, showToast]);
+    // Original fetchNodes logic replaced by useActionCache and shim above
 
     useEffect(() => {
         fetchNodes();
@@ -759,42 +673,39 @@ export default function DrivePage() {
     }, [urlProjectId, folderPathKey, fetchNodes]); // Fetch nodes whenever URL project or path changes
 
     // Prefetch next level folders for smoother navigation (A->B->C->D pattern)
+    // Prefetch next level folders
     useEffect(() => {
         if (!nodes.length || !urlProjectId) return;
 
         const prefetch = async () => {
-            // Find folders in current view
-            const folderNodes = nodes.filter(n => n.type === 'FOLDER').slice(0, 5); // Prefetch up to 5 folders
+            const folderNodes = nodes.filter(n => n.type === 'FOLDER').slice(0, 5);
 
             for (const folder of folderNodes) {
-                // Construct path for the child folder
                 const childPathParts = [...(folderPath || []), folder.name];
                 const childPathKey = childPathParts.join('/');
-                const cacheKey = `cache_nodes_${urlProjectId}_${childPathKey}`;
-
-                // Force update cached data for subfolders (Silent background update)
-                // We do NOT check if it exists, so we ensure freshness for next click
+                // Use CACHE_KEYS
+                const cacheKey = CACHE_KEYS.NODES(urlProjectId, childPathKey);
 
                 try {
                     const pathParam = childPathParts.map(s => encodeURIComponent(s)).join('/');
                     const res = await fetch(`/api/drive?project=${encodeURIComponent(urlProjectId)}&path=${pathParam}`);
                     if (res.ok) {
                         const data = await res.json();
-                        if (data.nodes) {
-                            // Update cache
-                            localStorage.setItem(cacheKey, JSON.stringify(data.nodes));
-                        }
+                        // Note: We are caching 'data' (FolderResponse) instead of 'data.nodes'
+                        // because our hook expects the full object.
+                        // Existing code cached 'data.nodes'. 
+                        // Migration note: Old cache might be incompatible, but we are overwriting it.
+                        localStorage.setItem(cacheKey, JSON.stringify(data));
                     }
                 } catch (e) {
                     console.error("Prefetch failed for", childPathKey, e);
                 }
             }
         };
+        prefetch(); // call it
+    }, [nodes, urlProjectId, folderPath]);
 
-        // Delay prefetch slightly to allow main fetch to settle and UI to render
-        const t = setTimeout(prefetch, 800);
-        return () => clearTimeout(t);
-    }, [nodes, urlProjectId, folderPathKey]);
+
 
     useEffect(() => {
         if (isProjectSettingsOpen && currentProject) {
@@ -807,11 +718,32 @@ export default function DrivePage() {
             setSettingsTab('general');
 
             // Fetch members
-            const fetchMembers = async () => {
-                const { data } = await supabase.from('project_members').select('user_email').eq('project_id', currentProject.id);
-                if (data) setProjectMembers(data.map(d => d.user_email));
-            }
-            fetchMembers();
+            const fetchData = async () => {
+                try {
+                    // Fetch existing members
+                    const { data: membersData, error: membersError } = await supabase
+                        .from('project_members')
+                        .select('user_email')
+                        .eq('project_id', currentProject.id);
+
+                    if (membersError) throw membersError;
+                    if (membersData) setProjectMembers(membersData.map(d => d.user_email));
+
+                    // Fetch Whitelist for dropdown
+                    const { data: whitelistData, error: whitelistError } = await supabase
+                        .from('whitelist')
+                        .select('email');
+
+                    if (whitelistError) throw whitelistError;
+                    if (whitelistData) setWhitelist(whitelistData.map(row => row.email));
+
+                } catch (e) {
+                    console.error("Error fetching project settings data:", e);
+                    // Don't show toast to avoid spamming if just one part fails, or keep silent or show specific error
+                }
+            };
+
+            fetchData();
         }
     }, [isProjectSettingsOpen, currentProject, supabase]);
 
@@ -821,6 +753,25 @@ export default function DrivePage() {
             newFolderInputRef.current.select();
         }
     }, [isCreatingFolder]);
+
+    // Fetch Whitelist when Creating Project
+    useEffect(() => {
+        if (isCreatingProject) {
+            const fetchWhitelist = async () => {
+                setIsLoadingWhitelist(true);
+                try {
+                    const { data, error } = await supabase.from('whitelist').select('email');
+                    if (error) throw error;
+                    if (data) setWhitelist(data.map(d => d.email));
+                } catch (e) {
+                    console.error("Failed to fetch whitelist", e);
+                } finally {
+                    setIsLoadingWhitelist(false);
+                }
+            };
+            fetchWhitelist();
+        }
+    }, [isCreatingProject, supabase]);
 
     const handleDeleteProject = (project: Project) => {
         setDeleteModal({
@@ -832,7 +783,7 @@ export default function DrivePage() {
                     const res = await fetch(`/api/projects?id=${project.id}`, { method: 'DELETE' });
                     if (res.ok) {
                         showToast("Project deleted successfully", "success");
-                        fetchProjects();
+                        refreshProjects();
                         if (currentProject?.id === project.id) {
                             router.push('/drive');
                             setCurrentProject(null);
@@ -874,7 +825,7 @@ export default function DrivePage() {
                 setIsCreatingProject(false);
                 setNewProjectName("");
                 setNewProjectMembers([]);
-                fetchProjects();
+                refreshProjects();
             } else {
                 const err = await res.json();
                 showToast(err.error || "Failed to create project", "error");
@@ -1011,23 +962,47 @@ export default function DrivePage() {
         const cleanName = file.name.split('/').pop()?.split('\\').pop() || file.name;
         const taskId = existingTaskId || addTask('UPLOAD', cleanName);
 
-        // --- Proxy Fallback Strategy ---
-        const doProxyUpload = async (): Promise<'SUCCESS' | 'CONFLICT' | 'ERROR' | 'CANCELLED'> => {
+        const uploadDirectly = async (): Promise<'SUCCESS' | 'CONFLICT' | 'ERROR' | 'CANCELLED'> => {
             try {
-                // Use XMLHttpRequest for Progress
-                return new Promise((resolve) => {
+                // 1. Init Upload (Get Presigned URL)
+                const initRes = await fetch('/api/drive/upload/init', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        filename: cleanName,
+                        fileSize: file.size,
+                        fileType: file.type,
+                        parentId,
+                        projectId: currentProject?.id,
+                        resolution,
+                        silent
+                    })
+                });
+
+                if (initRes.status === 409) {
+                    const conflictData = await initRes.json();
+                    if (conflictData.conflict) {
+                        setConflictInfo({ file, parentId, taskId, data: conflictData.existing });
+                        return 'CONFLICT';
+                    }
+                }
+
+                if (!initRes.ok) {
+                    const err = await initRes.json();
+                    throw new Error(err.error || 'Initialization failed');
+                }
+
+                const { url, key, resolvedProjectId } = await initRes.json();
+
+                // 2. Direct Upload to R2 (PUT)
+                // We use XMLHttpRequest for progress tracking, as fetch doesn't support upload progress yet (in standard)
+                await new Promise((resolve, reject) => {
                     const xhr = new XMLHttpRequest();
                     if (abortControllerRef.current) {
                         abortControllerRef.current.signal.addEventListener('abort', () => xhr.abort());
                     }
 
-                    xhr.open('POST', '/api/drive/upload/proxy', true);
-
-                    // Pass metadata in headers to avoid FormData parsing overhead/errors
-                    xhr.setRequestHeader('x-filename', encodeURIComponent(cleanName));
-                    xhr.setRequestHeader('x-parent-id', parentId || 'null');
-                    if (currentProject) xhr.setRequestHeader('x-project-id', currentProject.id);
-                    xhr.setRequestHeader('x-skip-db', 'true');
+                    xhr.open('PUT', url, true);
                     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
 
                     xhr.upload.onprogress = (event) => {
@@ -1037,83 +1012,63 @@ export default function DrivePage() {
                         }
                     };
 
-                    xhr.onload = async () => {
+                    xhr.onload = () => {
                         if (xhr.status >= 200 && xhr.status < 300) {
-                            try {
-                                const res = JSON.parse(xhr.responseText);
-                                if (res.error) throw new Error(res.error);
-
-                                // Step 2: Complete via API
-                                const completeRes = await fetch('/api/drive/upload/complete', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        key: res.key,
-                                        filename: cleanName,
-                                        size: file.size,
-                                        type: res.type,
-                                        projectId: res.projectId,
-                                        parentId,
-                                        resolution,
-                                        silent
-                                    })
-                                });
-
-                                if (completeRes.ok) {
-                                    filesProgressRef.current.set(taskId, file.size);
-                                    updateGlobalProgress();
-                                    updateTask(taskId, 'SUCCESS');
-                                    if (!silent) {
-                                        fetchNodes(true);
-                                        refreshStorage();
-                                    }
-                                    resolve('SUCCESS');
-                                } else {
-                                    const err = await completeRes.json();
-                                    console.error('Completion error:', err);
-                                    updateTask(taskId, 'ERROR');
-                                    resolve('ERROR');
-                                }
-                            } catch (e) {
-                                console.error('Proxy completion processing failed:', e);
-                                updateTask(taskId, 'ERROR');
-                                resolve('ERROR');
-                            }
+                            resolve('SUCCESS');
                         } else {
-                            console.error('Proxy upload failed status:', xhr.status);
-                            try {
-                                console.error('Proxy Error Details:', JSON.parse(xhr.responseText));
-                            } catch (e) {
-                                console.error('Proxy Error Text:', xhr.responseText);
-                            }
-                            updateTask(taskId, 'ERROR');
-                            resolve('ERROR');
+                            reject(new Error(`Upload failed with status ${xhr.status}`));
                         }
                     };
 
-                    xhr.onerror = () => {
-                        console.error('Proxy upload network error');
-                        updateTask(taskId, 'ERROR');
-                        resolve('ERROR');
-                    };
-
-                    xhr.onabort = () => {
-                        updateTask(taskId, 'CANCELLED');
-                        resolve('CANCELLED');
-                    };
+                    xhr.onerror = () => reject(new Error('Network error during upload'));
+                    xhr.onabort = () => reject(new Error('Cancelled'));
 
                     xhr.send(file);
                 });
-            } catch (e) {
-                console.error("Proxy upload exception:", e);
+
+                filesProgressRef.current.set(taskId, file.size); // Ensure 100%
+                updateGlobalProgress();
+
+                // 3. Complete Upload
+                const completeRes = await fetch('/api/drive/upload/complete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        key,
+                        filename: cleanName,
+                        type: file.type,
+                        projectId: resolvedProjectId,
+                        parentId,
+                        resolution,
+                        silent
+                    })
+                });
+
+                if (!completeRes.ok) {
+                    const err = await completeRes.json();
+                    throw new Error(err.error || 'Completion failed');
+                }
+
+                updateTask(taskId, 'SUCCESS');
+                if (!silent) {
+                    fetchNodes(true);
+                    refreshStorage();
+                }
+                return 'SUCCESS';
+
+            } catch (e: any) {
+                if (e.message === 'Cancelled') {
+                    updateTask(taskId, 'CANCELLED');
+                    return 'CANCELLED';
+                }
+                console.error("Direct upload error:", e);
                 updateTask(taskId, 'ERROR');
+                // Don't show generic toast here, let the UI reflect ERROR status
                 return 'ERROR';
             }
         };
 
-        // [CORS Fix] Always use Proxy Upload to avoid R2 CORS issues entirely.
-        // This removes the "Direct Upload" system as requested by the user.
-        return doProxyUpload();
+        return uploadDirectly();
 
         /* Legacy Direct Upload Code - Removed for Stability
         try {
@@ -2667,7 +2622,12 @@ export default function DrivePage() {
                                     <div>
                                         <label className="block text-sm font-medium text-slate-700 mb-1">Members (Select from Whitelist)</label>
                                         <div className="border border-slate-300 rounded-lg max-h-40 overflow-y-auto bg-slate-50 p-2">
-                                            {whitelist.length === 0 ? (
+                                            {isLoadingWhitelist ? (
+                                                <div className="flex items-center justify-center p-4">
+                                                    <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+                                                    <span className="ml-2 text-xs text-slate-400">Loading users...</span>
+                                                </div>
+                                            ) : whitelist.length === 0 ? (
                                                 <p className="text-xs text-slate-400 p-2">No users in whitelist.</p>
                                             ) : (
                                                 whitelist.map(email => (

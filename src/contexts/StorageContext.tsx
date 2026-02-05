@@ -1,6 +1,8 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { useActionCache } from '@/hooks/useActionCache';
+import { CACHE_KEYS } from '@/constants/cacheKeys';
 
 interface StorageContextType {
     totalSize: number;
@@ -10,37 +12,21 @@ interface StorageContextType {
 const StorageContext = createContext<StorageContextType | undefined>(undefined);
 
 export function StorageProvider({ children }: { children: React.ReactNode }) {
-    const [totalSize, setTotalSize] = useState<number>(0);
-
-    // Initial load from localStorage to avoid flicker
-    useEffect(() => {
-        if (typeof window !== 'undefined') {
-            const saved = localStorage.getItem('storage_total_size');
-            if (saved) {
-                setTotalSize(parseInt(saved, 10));
-            }
-        }
-        // Then fetch fresh data immediately
-        refreshStorage();
+    const fetchStorage = useCallback(async () => {
+        const res = await fetch('/api/stats');
+        const data = await res.json();
+        if (typeof data.totalSize !== 'number') throw new Error('Invalid storage data');
+        return data.totalSize as number;
     }, []);
 
-    const refreshStorage = useCallback(async () => {
-        try {
-            const res = await fetch('/api/stats');
-            const data = await res.json();
-            if (typeof data.totalSize === 'number') {
-                setTotalSize(data.totalSize);
-                if (typeof window !== 'undefined') {
-                    localStorage.setItem('storage_total_size', data.totalSize.toString());
-                }
-            }
-        } catch (error) {
-            console.error('Failed to fetch storage stats:', error);
-        }
-    }, []);
+    const { data: totalSize, refresh: refreshStorage } = useActionCache<number>(
+        CACHE_KEYS.STORAGE_STATS,
+        fetchStorage,
+        { initialData: 0 }
+    );
 
     return (
-        <StorageContext.Provider value={{ totalSize, refreshStorage }}>
+        <StorageContext.Provider value={{ totalSize: totalSize || 0, refreshStorage: async () => { await refreshStorage(false); } }}>
             {children}
         </StorageContext.Provider>
     );
