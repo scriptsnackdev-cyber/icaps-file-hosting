@@ -41,11 +41,12 @@ export default function DrivePage() {
     const { showToast } = useToast();
     const { refreshStorage } = useStorage();
     const { isAdmin, userEmail, userId } = useAuth();
+    const supabase = createClient();
 
     // Project structure: /drive/[projectId]/[...folders]
     const slugKey = slug?.join('/') || '';
     const urlProjectId = slug?.[0];
-    const folderPath = React.useMemo(() => slug?.slice(1) || [], [slugKey]); // Use slugKey for stability
+    const folderPath = React.useMemo(() => (slug?.slice(1) || []).map(s => decodeURIComponent(s)), [slugKey]); // Use slugKey for stability
     const folderPathKey = folderPath.join('/');
 
     const { projects, projectsLoading, refreshProjects } = useActionContext();
@@ -67,6 +68,9 @@ export default function DrivePage() {
 
     // Chunk Loading / Infinite Scroll
     const [displayNodes, setDisplayNodes] = useState<StorageNode[]>([]);
+    const displayNodesRef = useRef<StorageNode[]>([]);
+    useEffect(() => { displayNodesRef.current = displayNodes; }, [displayNodes]);
+
     const [offset, setOffset] = useState(0);
     const [hasMore, setHasMore] = useState(false);
     const [isFetchingMore, setIsFetchingMore] = useState(false);
@@ -87,16 +91,19 @@ export default function DrivePage() {
         return await res.json();
     }, [urlProjectId, folderPathKey]);
 
+    const cachedFetcher = useCallback(() => fetchFolderData(0), [fetchFolderData]);
+
     const {
         data: folderData,
         loading: folderLoading,
         refresh: refreshFolder
     } = useActionCache<any>(
         CACHE_KEYS.NODES(urlProjectId || '', folderPathKey),
-        () => fetchFolderData(0),
+        cachedFetcher,
         {
             persist: true,
             onSuccess: (data) => {
+                if (!data) return;
                 setDisplayNodes(data.nodes || []);
                 setHasMore(data.hasMore || false);
                 setOffset(data.nodes?.length || 0);
@@ -136,9 +143,12 @@ export default function DrivePage() {
 
     const nodes: StorageNode[] = React.useMemo(() => {
         const serverNodes = displayNodes;
+        // Use a set of names+types for O(1) lookup during filtering
+        const serverNodeKeys = new Set(serverNodes.map((s: any) => `${s.name}-${s.type}`));
+
         // Filter out optimistic nodes that have already appeared on server
         const filteredOptimistic = optimisticNodes.filter(o =>
-            !serverNodes.some((s: any) => s.name === o.name && s.type === o.type)
+            !serverNodeKeys.has(`${o.name}-${o.type}`)
         );
         return [...filteredOptimistic, ...serverNodes];
     }, [displayNodes, optimisticNodes]);
@@ -164,6 +174,9 @@ export default function DrivePage() {
 
     // Shim for existing codebase calling "fetchNodes"
     const fetchNodes = useCallback(async (force = false, silent = false) => {
+        // Prevent background polling from resetting the list if user has loaded more chunks
+        if (silent && displayNodesRef.current.length > LIMIT) return;
+
         await refreshFolder(silent);
     }, [refreshFolder]);
 
@@ -704,6 +717,9 @@ export default function DrivePage() {
     };
 
     const openShareModalForNode = async (nodeId: string) => {
+        setShareNodeId(nodeId);
+        setIsShareModalOpen(true);
+
         try {
             const { data, error } = await supabase
                 .from('storage_nodes')
@@ -713,17 +729,16 @@ export default function DrivePage() {
 
             if (error) throw error;
 
-            setShareNodeId(nodeId);
             setShareConfig({
                 scope: (data.sharing_scope as 'PRIVATE' | 'PUBLIC') || 'PRIVATE',
                 passwordEnabled: !!data.share_password,
                 password: data.share_password || ''
             });
-            setIsShareModalOpen(true);
 
         } catch (e) {
             console.error(e);
             showToast("Failed to fetch share settings", "error");
+            setIsShareModalOpen(false);
         }
     };
 
@@ -741,7 +756,6 @@ export default function DrivePage() {
         fetchWhitelist();
     }, []);
 
-    const supabase = createClient();
 
     // fetchProjects removed (handled by Context)
     // fetchNodes shim defined above
@@ -753,34 +767,39 @@ export default function DrivePage() {
         fetchNodes();
     }, [urlProjectId, folderPathKey, fetchNodes]);
 
-    // Background Polling
-    useEffect(() => {
-        const interval = setInterval(() => {
-            if (document.visibilityState === 'visible' && !loading) {
-                fetchNodes(true, true);
-            }
-        }, 5000);
+    // Background Polling - DISABLED due to performance issues/freezing
+    // useEffect(() => {
+    //     const interval = setInterval(() => {
+    //         if (document.visibilityState === 'visible' && !loading) {
+    //             fetchNodes(true, true);
+    //         }
+    //     }, 5000);
 
-        return () => clearInterval(interval);
-    }, [fetchNodes, loading]); // loading included here is safe because this effect ONLY sets up the interval, it doesn't call fetchNodes immediately
+    //     return () => clearInterval(interval);
+    // }, [fetchNodes, loading]);
+
+    const prefetchedPathsRef = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        prefetchedPathsRef.current.clear();
+    }, [urlProjectId, folderPathKey]);
 
     // Prefetch next level folders for smoother navigation (A->B->C->D pattern)
     useEffect(() => {
-        if (!nodes.length || !urlProjectId) return;
+        const folderNodes = nodes.filter(n => n.type === 'FOLDER').slice(0, 3);
+        if (folderNodes.length === 0 || !urlProjectId) return;
 
         let isMounted = true;
         const prefetch = async () => {
-            // Limit to first 3 folders to save bandwidth
-            const folderNodes = nodes.filter(n => n.type === 'FOLDER').slice(0, 3);
-
             for (const folder of folderNodes) {
-                if (!isMounted) break; // Stop if unmounted/dependencies changed
+                if (!isMounted) break;
 
                 const childPathParts = [...(folderPath || []), folder.name];
                 const childPathKey = childPathParts.join('/');
-                const cacheKey = CACHE_KEYS.NODES(urlProjectId, childPathKey);
 
-                // Skip if already cached recently (simple check could be added here if we had timestamps)
+                // Skip if already prefetched in this session
+                if (prefetchedPathsRef.current.has(childPathKey)) continue;
+
+                const cacheKey = CACHE_KEYS.NODES(urlProjectId, childPathKey);
 
                 try {
                     const pathParam = childPathParts.map(s => encodeURIComponent(s)).join('/');
@@ -791,6 +810,7 @@ export default function DrivePage() {
                         const data = await res.json();
                         if (!isMounted) break;
                         localStorage.setItem(cacheKey, JSON.stringify(data));
+                        prefetchedPathsRef.current.add(childPathKey);
                     }
                 } catch (e) {
                     console.error("Prefetch failed for", childPathKey, e);
@@ -798,9 +818,7 @@ export default function DrivePage() {
             }
         };
 
-        // Delay prefetch slightly to prioritize main content loading
         const timer = setTimeout(prefetch, 1000);
-
         return () => {
             isMounted = false;
             clearTimeout(timer);
@@ -1163,9 +1181,14 @@ export default function DrivePage() {
                     updateTask(taskId, 'CANCELLED');
                     return 'CANCELLED';
                 }
-                console.error("Direct upload error:", e);
+                console.error(`Upload error for ${cleanName}:`, e);
+
+                // Detailed logging for large files
+                if (file.size > 10 * 1024 * 1024) {
+                    console.warn(`Large file upload failed. size: ${(file.size / 1024 / 1024).toFixed(2)}MB, error: ${e.message}`);
+                }
+
                 updateTask(taskId, 'ERROR');
-                // Don't show generic toast here, let the UI reflect ERROR status
                 return 'ERROR';
             }
         };
@@ -1242,7 +1265,7 @@ export default function DrivePage() {
 
     // Generic Concurrent Upload Helper
     const uploadFilesConcurrent = async (files: File[], parentIdResolver: (file: File) => string | null) => {
-        const CONCURRENCY_LIMIT = 5;
+        const CONCURRENCY_LIMIT = 3; // Reduced from 5 for better stability with large files
         const pool: Promise<void>[] = [];
 
         // Initialize Batch Stats if not already set (e.g. by startFolderUpload)
@@ -2035,15 +2058,7 @@ export default function DrivePage() {
                                 )}
                             </div>
                         </div>
-                        <div className="text-sm text-slate-500 bg-white px-3 py-1.5 rounded-full border border-slate-200 shadow-sm flex items-center justify-between">
-                            <div>
-                                Quote:
-                                <span className={`font-semibold ml-1 ${(currentProject!.current_storage_bytes / currentProject!.max_storage_bytes) > 0.9 ? 'text-red-500' : 'text-slate-700'}`}>
-                                    {(currentProject!.current_storage_bytes / (1024 * 1024)).toFixed(2)} MB
-                                </span>
-                                / {(currentProject!.max_storage_bytes / (1024 * 1024)).toFixed(0)} MB
-                            </div>
-                        </div>
+
 
                         {/* Drag Overlay */}
                         {dragActive && (
@@ -2088,7 +2103,7 @@ export default function DrivePage() {
                         <DriveNodesList
                             nodes={nodes}
                             sortedNodes={sortedNodes}
-                            loading={loading}
+                            loading={folderLoading}
                             isAdmin={isAdmin}
                             userEmail={userEmail}
                             selectedNodeIds={selectedNodeIds}

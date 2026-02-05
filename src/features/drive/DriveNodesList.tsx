@@ -210,7 +210,38 @@ export const DriveNodesList: React.FC<DriveNodesListProps> = ({
                         )}
                     </AnimatePresence>
 
-                    {nodes.length === 0 && !isCreatingFolder && (
+                    {/* Skeleton Loading State */}
+                    {loading && nodes.length === 0 && (
+                        <>
+                            {[...Array(8)].map((_, i) => (
+                                <tr key={`skeleton-${i}`} className="animate-pulse">
+                                    <td className="px-6 py-4">
+                                        <div className="w-4 h-4 bg-slate-100 rounded"></div>
+                                    </td>
+                                    <td className="px-6 py-4">
+                                        <div className="flex items-center gap-4">
+                                            <div className="w-10 h-10 bg-slate-100 rounded-lg"></div>
+                                            <div className="flex flex-col gap-2">
+                                                <div className="h-4 bg-slate-100 rounded w-48 sm:w-64"></div>
+                                                <div className="h-3 bg-slate-100 rounded w-24"></div>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td className="px-6 py-4">
+                                        <div className="flex items-center gap-2">
+                                            <div className="w-6 h-6 rounded-full bg-slate-100"></div>
+                                            <div className="h-3 bg-slate-100 rounded w-20"></div>
+                                        </div>
+                                    </td>
+                                    <td className="px-6 py-4">
+                                        <div className="h-3 bg-slate-100 rounded w-24"></div>
+                                    </td>
+                                </tr>
+                            ))}
+                        </>
+                    )}
+
+                    {!loading && nodes.length === 0 && !isCreatingFolder && (
                         <tr>
                             <td colSpan={5} className="px-6 py-24 text-center">
                                 <div className="flex flex-col items-center justify-center">
@@ -242,159 +273,153 @@ export const DriveNodesList: React.FC<DriveNodesListProps> = ({
                         </tr>
                     )}
 
-                    <AnimatePresence mode="popLayout" initial={false}>
-                        {sortedNodes.map((node, index) => (
-                            <motion.tr
-                                key={node.id}
-                                layout
-                                initial={{ opacity: 0, y: 10 }}
-                                animate={{ opacity: 1, y: 0, transition: { delay: index * 0.02, duration: 0.2 } }}
-                                exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.1 } }}
-                                draggable={isAdmin || node.owner_email === userEmail}
-                                onDragStart={(e: any) => {
-                                    if (!(isAdmin || node.owner_email === userEmail)) {
-                                        e.preventDefault();
-                                        return;
-                                    }
-                                    setDraggedNode(node);
-                                    e.dataTransfer.effectAllowed = 'move';
-                                }}
-                                onDragOver={(e: any) => {
-                                    if (draggedNode && node.type === 'FOLDER' && node.id !== draggedNode.id) {
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                        setDragOverNodeId(node.id);
-                                        e.dataTransfer.dropEffect = 'move';
-                                    }
-                                }}
-                                onDragLeave={(e: any) => {
-                                    if (dragOverNodeId === node.id) {
-                                        setDragOverNodeId(null);
-                                    }
-                                }}
-                                onDrop={async (e: any) => {
+                    {sortedNodes.map((node) => (
+                        <tr
+                            key={node.id}
+                            draggable={isAdmin || node.owner_email === userEmail}
+                            onDragStart={(e: any) => {
+                                if (!(isAdmin || node.owner_email === userEmail)) {
+                                    e.preventDefault();
+                                    return;
+                                }
+                                setDraggedNode(node);
+                                e.dataTransfer.effectAllowed = 'move';
+                            }}
+                            onDragOver={(e: any) => {
+                                if (draggedNode && node.type === 'FOLDER' && node.id !== draggedNode.id) {
                                     e.preventDefault();
                                     e.stopPropagation();
+                                    setDragOverNodeId(node.id);
+                                    e.dataTransfer.dropEffect = 'move';
+                                }
+                            }}
+                            onDragLeave={(e: any) => {
+                                if (dragOverNodeId === node.id) {
                                     setDragOverNodeId(null);
-                                    if (draggedNode && node.type === 'FOLDER' && node.id !== draggedNode.id) {
-                                        if (selectedNodeIds.has(draggedNode.id)) {
-                                            const itemsToMove = nodes.filter(n => selectedNodeIds.has(n.id));
-                                            for (const item of itemsToMove) {
-                                                if (item.id !== node.id) {
-                                                    await handleMoveNode(item, node.id);
-                                                }
+                                }
+                            }}
+                            onDrop={async (e: any) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setDragOverNodeId(null);
+                                if (draggedNode && node.type === 'FOLDER' && node.id !== draggedNode.id) {
+                                    if (selectedNodeIds.has(draggedNode.id)) {
+                                        const itemsToMove = nodes.filter(n => selectedNodeIds.has(n.id));
+                                        for (const item of itemsToMove) {
+                                            if (item.id !== node.id) {
+                                                await handleMoveNode(item, node.id);
                                             }
-                                            showToast(`Moved ${itemsToMove.length} items`, "success");
-                                        } else {
-                                            handleMoveNode(draggedNode, node.id);
                                         }
-                                        setDraggedNode(null);
-                                        setSelectedNodeIds(new Set());
-                                    }
-                                }}
-                                onMouseEnter={() => {
-                                    if (node.type === 'FOLDER') {
-                                        prefetchFolder(node);
-                                    }
-                                }}
-                                className={`group transition-all cursor-pointer duration-200 ${dragOverNodeId === node.id ? 'bg-blue-100 ring-2 ring-inset ring-blue-500 z-10' : 'hover:bg-blue-50/40'}`}
-                                onClick={() => {
-                                    if (node.type === 'FOLDER') {
-                                        navigateToFolder(node);
+                                        showToast(`Moved ${itemsToMove.length} items`, "success");
                                     } else {
-                                        handlePreview(node);
+                                        handleMoveNode(draggedNode, node.id);
                                     }
-                                }}
-                                onContextMenu={(e) => handleContextMenu(e, node)}
-                            >
-                                <td className="px-6 py-3 relative z-20">
-                                    <input
-                                        type="checkbox"
-                                        checked={selectedNodeIds.has(node.id)}
-                                        onChange={(e) => {
-                                            e.stopPropagation();
-                                            toggleNodeSelection(node.id);
-                                        }}
-                                        onClick={(e) => e.stopPropagation()}
-                                        className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer w-4 h-4"
-                                    />
-                                </td>
-                                <td className="px-6 py-3">
-                                    <div className="flex items-center gap-4">
-                                        {node.type === 'FOLDER' ? (
-                                            <div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-lg flex items-center justify-center shadow-sm group-hover:bg-indigo-100 group-hover:scale-105 transition-all">
-                                                <Folder className="w-5 h-5 fill-current" />
-                                            </div>
-                                        ) : (
-                                            (() => {
-                                                const ext = node.name.split('.').pop()?.toLowerCase() || '';
-                                                let colorClass = "bg-blue-50 text-blue-600 group-hover:bg-blue-100";
-                                                if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) colorClass = "bg-purple-50 text-purple-600 group-hover:bg-purple-100";
-                                                else if (['mp4', 'webm', 'mov', 'avi'].includes(ext)) colorClass = "bg-orange-50 text-orange-600 group-hover:bg-orange-100";
-                                                else if (['mp3', 'wav', 'ogg'].includes(ext)) colorClass = "bg-pink-50 text-pink-600 group-hover:bg-pink-100";
-                                                else if (['pdf'].includes(ext)) colorClass = "bg-red-50 text-red-600 group-hover:bg-red-100";
-                                                else if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) colorClass = "bg-amber-50 text-amber-600 group-hover:bg-amber-100";
-                                                else if (['xls', 'xlsx', 'csv'].includes(ext)) colorClass = "bg-emerald-50 text-emerald-600 group-hover:bg-emerald-100";
-                                                else if (['doc', 'docx'].includes(ext)) colorClass = "bg-blue-50 text-blue-600 group-hover:bg-blue-100";
-                                                else if (['ppt', 'pptx'].includes(ext)) colorClass = "bg-rose-50 text-rose-600 group-hover:bg-rose-100";
-                                                else if (['js', 'ts', 'tsx', 'jsx', 'json', 'py', 'java', 'html', 'css', 'php', 'c', 'cpp'].includes(ext)) colorClass = "bg-slate-100 text-slate-600 group-hover:bg-slate-200 border border-slate-200";
-                                                else if (ext === 'splan') colorClass = "bg-indigo-50 text-indigo-600 group-hover:bg-indigo-100 border border-indigo-100";
+                                    setDraggedNode(null);
+                                    setSelectedNodeIds(new Set());
+                                }
+                            }}
+                            onMouseEnter={() => {
+                                if (node.type === 'FOLDER') {
+                                    prefetchFolder(node);
+                                }
+                            }}
+                            className={`group transition-all cursor-pointer duration-200 ${dragOverNodeId === node.id ? 'bg-blue-100 ring-2 ring-inset ring-blue-500 z-10' : 'hover:bg-blue-50/40'}`}
+                            onClick={() => {
+                                if (node.type === 'FOLDER') {
+                                    navigateToFolder(node);
+                                } else {
+                                    handlePreview(node);
+                                }
+                            }}
+                            onContextMenu={(e) => handleContextMenu(e, node)}
+                        >
+                            <td className="px-6 py-3 relative z-20">
+                                <input
+                                    type="checkbox"
+                                    checked={selectedNodeIds.has(node.id)}
+                                    onChange={(e) => {
+                                        e.stopPropagation();
+                                        toggleNodeSelection(node.id);
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer w-4 h-4"
+                                />
+                            </td>
+                            <td className="px-6 py-3">
+                                <div className="flex items-center gap-4">
+                                    {node.type === 'FOLDER' ? (
+                                        <div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-lg flex items-center justify-center shadow-sm group-hover:bg-indigo-100 group-hover:scale-105 transition-all">
+                                            <Folder className="w-5 h-5 fill-current" />
+                                        </div>
+                                    ) : (
+                                        (() => {
+                                            const ext = node.name.split('.').pop()?.toLowerCase() || '';
+                                            let colorClass = "bg-blue-50 text-blue-600 group-hover:bg-blue-100";
+                                            if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) colorClass = "bg-purple-50 text-purple-600 group-hover:bg-purple-100";
+                                            else if (['mp4', 'webm', 'mov', 'avi'].includes(ext)) colorClass = "bg-orange-50 text-orange-600 group-hover:bg-orange-100";
+                                            else if (['mp3', 'wav', 'ogg'].includes(ext)) colorClass = "bg-pink-50 text-pink-600 group-hover:bg-pink-100";
+                                            else if (['pdf'].includes(ext)) colorClass = "bg-red-50 text-red-600 group-hover:bg-red-100";
+                                            else if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) colorClass = "bg-amber-50 text-amber-600 group-hover:bg-amber-100";
+                                            else if (['xls', 'xlsx', 'csv'].includes(ext)) colorClass = "bg-emerald-50 text-emerald-600 group-hover:bg-emerald-100";
+                                            else if (['doc', 'docx'].includes(ext)) colorClass = "bg-blue-50 text-blue-600 group-hover:bg-blue-100";
+                                            else if (['ppt', 'pptx'].includes(ext)) colorClass = "bg-rose-50 text-rose-600 group-hover:bg-rose-100";
+                                            else if (['js', 'ts', 'tsx', 'jsx', 'json', 'py', 'java', 'html', 'css', 'php', 'c', 'cpp'].includes(ext)) colorClass = "bg-slate-100 text-slate-600 group-hover:bg-slate-200 border border-slate-200";
+                                            else if (ext === 'splan') colorClass = "bg-indigo-50 text-indigo-600 group-hover:bg-indigo-100 border border-indigo-100";
 
-                                                return (
-                                                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm transition-all group-hover:scale-105 ${colorClass}`}>
-                                                        {ext === 'splan' ? <Calendar className="w-5 h-5" /> : <FileText className="w-5 h-5" />}
-                                                    </div>
-                                                );
-                                            })()
-                                        )}
-                                        <div>
-                                            <p className="font-medium text-slate-700 group-hover:text-blue-700 transition-colors flex items-center gap-2">
-                                                {node.name}
-                                                {node.version && node.version > 1 && (
-                                                    <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-600 border border-blue-200">
-                                                        v{node.version}
-                                                    </span>
-                                                )}
-                                                {node.id.startsWith('optimistic-') && (
-                                                    <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-500 border border-blue-100 animate-pulse">
-                                                        <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                                                        Uploading...
-                                                    </span>
-                                                )}
-                                            </p>
-                                            <div className="flex items-center gap-2">
-                                                {node.type === 'FILE' && (
-                                                    <p className="text-xs text-slate-400">{(node.size! / 1024).toFixed(1)} KB</p>
-                                                )}
-                                                {node.id.startsWith('optimistic-') && (
-                                                    <div className="w-24 h-1 bg-slate-100 rounded-full overflow-hidden">
-                                                        <div className="h-full bg-blue-500 animate-[shimmer_1.5s_infinite]" style={{ width: '40%' }} />
-                                                    </div>
-                                                )}
-                                            </div>
+                                            return (
+                                                <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm transition-all group-hover:scale-105 ${colorClass}`}>
+                                                    {ext === 'splan' ? <Calendar className="w-5 h-5" /> : <FileText className="w-5 h-5" />}
+                                                </div>
+                                            );
+                                        })()
+                                    )}
+                                    <div>
+                                        <p className="font-medium text-slate-700 group-hover:text-blue-700 transition-colors flex items-center gap-2">
+                                            {node.name}
+                                            {node.version && node.version > 1 && (
+                                                <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-600 border border-blue-200">
+                                                    v{node.version}
+                                                </span>
+                                            )}
+                                            {node.id.startsWith('optimistic-') && (
+                                                <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-500 border border-blue-100 animate-pulse">
+                                                    <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                                                    Uploading...
+                                                </span>
+                                            )}
+                                        </p>
+                                        <div className="flex items-center gap-2">
+                                            {node.type === 'FILE' && (
+                                                <p className="text-xs text-slate-400">{(node.size! / 1024).toFixed(1)} KB</p>
+                                            )}
+                                            {node.id.startsWith('optimistic-') && (
+                                                <div className="w-24 h-1 bg-slate-100 rounded-full overflow-hidden">
+                                                    <div className="h-full bg-blue-500 animate-[shimmer_1.5s_infinite]" style={{ width: '40%' }} />
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
-                                </td>
-                                <td className="px-6 py-3 text-sm text-slate-600">
-                                    <div className="flex items-center gap-2">
-                                        <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-slate-200 to-slate-300 flex items-center justify-center text-[10px] font-bold text-slate-600 border border-white shadow-sm">
-                                            {node.owner_email?.[0].toUpperCase() || '?'}
-                                        </div>
-                                        <span className="truncate max-w-[120px] opacity-80">{node.owner_email?.split('@')[0] || 'You'}</span>
+                                </div>
+                            </td>
+                            <td className="px-6 py-3 text-sm text-slate-600">
+                                <div className="flex items-center gap-2">
+                                    <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-slate-200 to-slate-300 flex items-center justify-center text-[10px] font-bold text-slate-600 border border-white shadow-sm">
+                                        {node.owner_email?.[0].toUpperCase() || '?'}
                                     </div>
-                                </td>
-                                <td className="px-6 py-3 text-sm text-slate-500 font-mono text-xs">
-                                    {(() => {
-                                        const date = new Date(node.updated_at);
-                                        const isToday = date.toDateString() === new Date().toDateString();
-                                        return isToday
-                                            ? `Today ${format(date, 'HH:mm')}`
-                                            : format(date, 'MMM d, yyyy');
-                                    })()}
-                                </td>
-                            </motion.tr>
-                        ))}
-                    </AnimatePresence>
+                                    <span className="truncate max-w-[120px] opacity-80">{node.owner_email?.split('@')[0] || 'You'}</span>
+                                </div>
+                            </td>
+                            <td className="px-6 py-3 text-sm text-slate-500 font-mono text-xs">
+                                {(() => {
+                                    const date = new Date(node.updated_at);
+                                    const isToday = date.toDateString() === new Date().toDateString();
+                                    return isToday
+                                        ? `Today ${format(date, 'HH:mm')}`
+                                        : format(date, 'MMM d, yyyy');
+                                })()}
+                            </td>
+                        </tr>
+                    ))}
                 </tbody>
             </table>
 

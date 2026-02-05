@@ -136,102 +136,113 @@ export async function POST(request: NextRequest) {
         }
 
         // 3. Update Quota
-        // We do this immediately to ensure data consistency, or we can parallelize if we trust loose eventual consistency.
-        // Doing it immediately is safer for quota enforcement.
-        const { error: rpcError } = await supabase.rpc('increment_project_storage', {
-            p_id: projectId,
-            amount: sizeDiff
-        });
-        if (rpcError) {
-            // Fallback
-            await supabase.from('projects')
-                .update({ current_storage_bytes: project.current_storage_bytes + sizeDiff })
-                .eq('id', projectId);
+        // We do this immediately to ensure data consistency
+        try {
+            const { error: rpcError } = await supabase.rpc('increment_project_storage', {
+                p_id: projectId,
+                amount: sizeDiff
+            });
+            if (rpcError) {
+                console.warn("Quota RPC failed, falling back to manual update:", rpcError);
+                await supabase.from('projects')
+                    .update({ current_storage_bytes: project.current_storage_bytes + sizeDiff })
+                    .eq('id', projectId);
+            }
+        } catch (quotaErr) {
+            console.error("Quota update critical failure:", quotaErr);
+            // We still proceed as the file is already in R2 and Node is created/updated
         }
 
-        // 4. Version Retention (Background)
-        const retentionTask = (async () => {
-            const retentionLimit = project.settings?.version_retention_limit;
-            if (retentionLimit && retentionLimit > 0) {
-                let vQuery = supabase.from('storage_nodes')
-                    .select('*')
-                    .eq('project_id', project.id)
-                    .eq('name', filename)
-                    .eq('type', 'FILE')
-                    .order('version', { ascending: false });
+        // [Performance] Non-critical tasks can run in parallel
+        // In Serverless, we should still wait for them, but they shouldn't block the DB result if possible
+        const nonCriticalTasks = [];
 
-                if (parentId && parentId !== 'null') vQuery = vQuery.eq('parent_id', parentId);
-                else vQuery = vQuery.is('parent_id', null);
+        // 4. Version Retention
+        nonCriticalTasks.push((async () => {
+            try {
+                const retentionLimit = project.settings?.version_retention_limit;
+                if (retentionLimit && retentionLimit > 0) {
+                    let vQuery = supabase.from('storage_nodes')
+                        .select('*')
+                        .eq('project_id', project.id)
+                        .eq('name', filename)
+                        .eq('type', 'FILE')
+                        .order('version', { ascending: false });
 
-                const { data: allVersions } = await vQuery;
-                if (allVersions && allVersions.length > retentionLimit) {
-                    const toPurge = allVersions.slice(retentionLimit);
-                    let spaceFreed = 0;
-                    for (const v of toPurge) {
-                        if (v.r2_key) {
-                            try {
-                                await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET_NAME, Key: v.r2_key }));
-                            } catch (e) { console.error(`Failed to purge v${v.version}`, e); }
-                            spaceFreed += (v.size || 0);
-                            await supabase.from('storage_nodes').update({ r2_key: null, size: 0 }).eq('id', v.id);
+                    if (parentId && parentId !== 'null') vQuery = vQuery.eq('parent_id', parentId);
+                    else vQuery = vQuery.is('parent_id', null);
+
+                    const { data: allVersions } = await vQuery;
+                    if (allVersions && allVersions.length > retentionLimit) {
+                        const toPurge = allVersions.slice(retentionLimit);
+                        let spaceFreed = 0;
+                        for (const v of toPurge) {
+                            if (v.r2_key) {
+                                try {
+                                    await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET_NAME, Key: v.r2_key }));
+                                } catch (e) { console.error(`Failed to purge v${v.version}`, e); }
+                                spaceFreed += (v.size || 0);
+                                await supabase.from('storage_nodes').update({ r2_key: null, size: 0 }).eq('id', v.id);
+                            }
+                        }
+                        if (spaceFreed > 0) {
+                            await supabase.rpc('update_project_storage', { project_id: project.id, size_delta: -spaceFreed });
                         }
                     }
-                    if (spaceFreed > 0) {
-                        await supabase.rpc('update_project_storage', { project_id: project.id, size_delta: -spaceFreed });
+                }
+            } catch (e) { console.error("Retention background error:", e); }
+        })());
+
+        // 5. Notifications
+        nonCriticalTasks.push((async () => {
+            try {
+                const isOwner = project.created_by === user.id;
+                const settings = project.settings || {};
+                if (!silent && !isOwner && settings.notify_on_activity) {
+                    const { data: rootFolder } = await supabase
+                        .from('storage_nodes')
+                        .select('owner_email')
+                        .eq('project_id', project.id)
+                        .is('parent_id', null)
+                        .limit(1)
+                        .single();
+
+                    if (rootFolder?.owner_email) {
+                        await sendActivityNotification({
+                            to: rootFolder.owner_email,
+                            projectName: project.name,
+                            userName: user.email || 'Unknown User',
+                            action: resolution === 'update' ? 'VERSION_UPDATED' : 'UPLOADED',
+                            fileName: filename,
+                            timestamp: new Date().toLocaleString()
+                        });
                     }
                 }
-            }
-        })();
-        postProcessTasks.push(retentionTask.catch(e => console.error("Retention logic error", e)));
+            } catch (e) { console.error("Notification background error:", e); }
+        })());
 
-        // 5. Notifications (Background)
-        const notificationTask = (async () => {
-            const isOwner = project.created_by === user.id;
-            const settings = project.settings || {};
-            if (!silent && !isOwner && settings.notify_on_activity) {
-                const { data: rootFolder } = await supabase
-                    .from('storage_nodes')
-                    .select('owner_email')
-                    .eq('project_id', project.id)
-                    .is('parent_id', null)
-                    .limit(1)
-                    .single();
-
-                if (rootFolder?.owner_email) {
-                    await sendActivityNotification({
-                        to: rootFolder.owner_email,
-                        projectName: project.name,
-                        userName: user.email || 'Unknown User',
-                        action: resolution === 'update' ? 'VERSION_UPDATED' : 'UPLOADED',
-                        fileName: filename,
-                        timestamp: new Date().toLocaleString()
-                    });
-                }
-            }
-        })();
-        postProcessTasks.push(notificationTask.catch(e => console.error("Notification Error", e)));
-
-        // 6. Access Log (Background)
-        postProcessTasks.push(
-            (async () => {
-                const { error } = await supabase.from('access_logs').insert({
+        // 6. Access Log
+        nonCriticalTasks.push((async () => {
+            try {
+                await supabase.from('access_logs').insert({
                     user_email: user.email,
                     action: 'UPLOAD',
                     file_key: key,
                     details: `Project: ${project.name} (${projectId})`
                 });
-                if (error) console.error("Logging Error", error);
-            })()
-        );
+            } catch (e) { console.error("Access log background error:", e); }
+        })());
 
-        // Execute background tasks mostly in parallel but we want to return fast
-        // In Serverless, we SHOULD await them. Promise.all is fast enough if tasks are non-blocking.
-        await Promise.all(postProcessTasks);
+        // Wait for non-critical tasks but don't let them crash the response
+        await Promise.allSettled(nonCriticalTasks);
 
         return NextResponse.json(node);
 
     } catch (error: any) {
-        console.error('Upload Complete Error:', error);
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        console.error('Upload Complete Critical Error:', error);
+        return NextResponse.json({
+            error: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        }, { status: 500 });
     }
 }

@@ -5,6 +5,8 @@ import { useActionCache } from '@/hooks/useActionCache';
 import { CACHE_KEYS } from '@/constants/cacheKeys';
 import { Project } from '@/types';
 
+import { useAuth } from './AuthContext';
+
 interface ActionContextType {
     projects: Project[];
     projectsLoading: boolean;
@@ -14,19 +16,22 @@ interface ActionContextType {
 const ActionContext = createContext<ActionContextType | undefined>(undefined);
 
 export function ActionProvider({ children }: { children: React.ReactNode }) {
+    const { userId } = useAuth();
 
     const fetchProjects = useCallback(async () => {
+        if (!userId) return [];
         const res = await fetch('/api/projects');
         if (!res.ok) throw new Error('Failed to fetch projects');
         return await res.json();
-    }, []);
+    }, [userId]);
 
     const {
         data: projects,
         loading: projectsLoading,
         refresh: refreshProjects
     } = useActionCache<Project[]>(CACHE_KEYS.PROJECTS, fetchProjects, {
-        initialData: []
+        initialData: [],
+        enabled: !!userId
     });
 
     return (

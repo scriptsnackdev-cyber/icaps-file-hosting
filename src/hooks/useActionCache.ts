@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 interface CacheOptions<T> {
     persist?: boolean;
     initialData?: T;
+    enabled?: boolean;
     onSuccess?: (data: T) => void;
     onError?: (error: any) => void;
 }
@@ -12,7 +13,7 @@ export function useActionCache<T>(
     fetcher: () => Promise<T>,
     options: CacheOptions<T> = {}
 ) {
-    const { persist = true, initialData } = options;
+    const { persist = true, initialData, enabled = true } = options;
     const [data, setData] = useState<T | null>(initialData || null);
     const [loading, setLoading] = useState<boolean>(!initialData);
     const [error, setError] = useState<any>(null);
@@ -20,6 +21,9 @@ export function useActionCache<T>(
 
     // Initial load from cache
     useEffect(() => {
+        setData(null);
+        setLoading(true);
+
         if (!persist || typeof window === 'undefined') {
             hasLoadedFromCache.current = true;
             return;
@@ -33,13 +37,21 @@ export function useActionCache<T>(
                 // If we found data in cache, we are not "loading" in the sense of empty UI
                 // But we will still fetch fresh data
                 setLoading(false);
+            } else {
+                setData(null);
+                setLoading(true);
             }
         } catch (e) {
             console.error(`Failed to parse cache for key ${key}`, e);
+            setData(null);
+            setLoading(true);
         } finally {
             hasLoadedFromCache.current = true;
         }
     }, [key, persist]);
+
+    const optionsRef = useRef(options);
+    useEffect(() => { optionsRef.current = options; }, [options]);
 
     // Fetch fresh data
     const refresh = useCallback(async (silent = false) => {
@@ -52,19 +64,24 @@ export function useActionCache<T>(
             if (persist && typeof window !== 'undefined') {
                 localStorage.setItem(key, JSON.stringify(result));
             }
-            options.onSuccess?.(result);
+            optionsRef.current.onSuccess?.(result);
         } catch (err) {
             console.error(`Fetcher failed for key ${key}`, err);
             setError(err);
-            options.onError?.(err);
+            optionsRef.current.onError?.(err);
         } finally {
             setLoading(false);
         }
-    }, [key, fetcher, persist, options]);
+    }, [key, fetcher, persist]);
 
     // Construct a composite key for dependencies to avoid infinite loops if fetcher is unstable
     // But ideally fetcher should be stable (useCallback)
     useEffect(() => {
+        if (!enabled) {
+            setLoading(false);
+            return;
+        }
+
         // Only fetch after we tried to load from cache
         if (hasLoadedFromCache.current) {
             refresh(!!data); // silent if we have data
@@ -73,7 +90,7 @@ export function useActionCache<T>(
             refresh();
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [key, refresh]); // Intentionally excluding data to avoid loop, relying on refresh stability
+    }, [key, refresh, enabled]); // Intentionally excluding data to avoid loop, relying on refresh stability
 
     return { data, loading, error, refresh, setData };
 }

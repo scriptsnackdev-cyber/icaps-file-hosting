@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET_NAME } from '@/lib/r2';
 import { createClient } from '@/utils/supabase/server';
+import { supabaseAdmin } from '@/lib/supabase-admin';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
 
@@ -40,6 +41,7 @@ async function getAllFiles(supabase: any, folderId: string, currentPath: string 
 export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const folderId = searchParams.get('folderId');
+    const pwd = searchParams.get('pwd');
     const nodeIdsParam = searchParams.get('nodeIds'); // Comma separated IDs
     const nodeIds = nodeIdsParam ? nodeIdsParam.split(',').filter(Boolean) : [];
 
@@ -48,16 +50,19 @@ export async function GET(request: NextRequest) {
     }
 
     const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
 
     let filesToZip: { key: string; name: string }[] = [];
     let zipName = 'download.zip';
 
     try {
         if (nodeIds.length > 0) {
-            // Bulk Selection Mode
+            // Bulk Selection Mode - Typically requires Auth
+            if (!user) return new NextResponse('Unauthorized', { status: 401 });
+
             zipName = 'bulk_download.zip';
 
-            // Fetch selected nodes
+            // Fetch selected nodes - use supabase client for RLS check
             const { data: nodes } = await supabase
                 .from('storage_nodes')
                 .select('*')
@@ -74,22 +79,49 @@ export async function GET(request: NextRequest) {
                         name: node.name
                     });
                 } else if (node.type === 'FOLDER') {
-                    const subFiles = await getAllFiles(supabase, node.id, node.name + '/');
+                    const subFiles = await getAllFiles(supabaseAdmin, node.id, node.name + '/');
                     filesToZip = [...filesToZip, ...subFiles];
                 }
             }
-            // If only one folder was selected, maybe name the zip after it? 
             if (nodes.length === 1 && nodes[0].type === 'FOLDER') {
                 zipName = `${nodes[0].name}.zip`;
             }
 
         } else if (folderId) {
-            // Single Folder Mode (Legacy/Direct)
-            const { data: folder } = await supabase.from('storage_nodes').select('*').eq('id', folderId).single();
+            // Single Folder Mode - Support Public Sharing
+            // 1. Fetch metadata with Admin to check availability
+            const { data: folder } = await supabaseAdmin.from('storage_nodes').select('*').eq('id', folderId).single();
             if (!folder) return new NextResponse('Folder not found', { status: 404 });
 
+            // 2. Check Access
+            let hasAccess = false;
+
+            // Check if it's PUBLIC
+            if (folder.sharing_scope === 'PUBLIC') {
+                if (folder.share_password) {
+                    if (pwd === folder.share_password) {
+                        hasAccess = true;
+                    } else {
+                        return new NextResponse('Invalid Password', { status: 403 });
+                    }
+                } else {
+                    hasAccess = true;
+                }
+            } else {
+                // If not public, check if current user has access via RLS or is owner
+                if (user) {
+                    // Try to fetch via normal client to check RLS
+                    const { data: authTest } = await supabase.from('storage_nodes').select('id').eq('id', folderId).maybeSingle();
+                    if (authTest) hasAccess = true;
+                }
+            }
+
+            if (!hasAccess) {
+                return new NextResponse('Unauthorized: Access Denied', { status: 403 });
+            }
+
             zipName = `${folder.name}.zip`;
-            filesToZip = await getAllFiles(supabase, folderId);
+            filesToZip = await getAllFiles(supabaseAdmin, folderId);
         }
 
         if (filesToZip.length === 0) {
