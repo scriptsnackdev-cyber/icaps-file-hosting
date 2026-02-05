@@ -23,6 +23,9 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const limit = parseInt(searchParams.get('limit') || '1000');
+    const offset = parseInt(searchParams.get('offset') || '0');
+
     try {
         let resolvedProjectId = projectId;
         if (projectId) {
@@ -84,61 +87,81 @@ export async function GET(request: NextRequest) {
         }
 
         // Fetch Children of Resolved ID within Project
-        // Initialize Base Query
-        let childrenQuery = supabase
-            .from('storage_nodes')
-            .select(isTrashView ? '*, projects(name)' : '*')
-            .order('type', { ascending: false })
-            .order('name', { ascending: true });
+        let nodes: any[] = [];
+        let totalCount = 0;
 
         if (isTrashView) {
             // Trash view: Flat list of items marked as TRASHED
-            // Re-initialize query for trash to be safe/clear
-            childrenQuery = supabase
+            const { data: trashData, error: trashError, count } = await supabase
                 .from('storage_nodes')
-                .select('*, projects(name)')
+                .select('*, projects(name)', { count: 'exact' })
                 .eq('status', 'TRASHED')
-                .order('trashed_at', { ascending: false, nullsFirst: true });
+                .match(resolvedProjectId ? { project_id: resolvedProjectId } : { owner_email: user.email })
+                .order('trashed_at', { ascending: false, nullsFirst: true })
+                .range(offset, offset + limit - 1);
 
-            if (resolvedProjectId) {
-                childrenQuery = childrenQuery.eq('project_id', resolvedProjectId);
-            } else {
-                // Global Trash: Show user's own trash across all projects
-                childrenQuery = childrenQuery.eq('owner_email', user.email);
-            }
-
+            if (trashError) throw trashError;
+            nodes = trashData || [];
+            totalCount = count || nodes.length;
         } else {
-            // Normal View: Filter out deleted and trashed
-            childrenQuery = childrenQuery.eq('project_id', resolvedProjectId);
+            // Normal View: Try Optimized RPC first
+            let rpcSuccess = false;
+            try {
+                const { data: rpcData, error: rpcError } = await supabase.rpc('get_folder_nodes', {
+                    p_project_id: resolvedProjectId,
+                    p_parent_id: currentFolderId,
+                    p_limit: limit,
+                    p_offset: offset
+                });
 
-            if (currentFolderId) {
-                childrenQuery = childrenQuery.eq('parent_id', currentFolderId);
-            } else {
-                childrenQuery = childrenQuery.is('parent_id', null);
+                if (!rpcError && rpcData) {
+                    nodes = rpcData;
+                    totalCount = rpcData.length > 0 ? (rpcData[0].full_count || rpcData.length) : 0;
+                    rpcSuccess = true;
+                }
+            } catch (e) {
+                // Fallback silently
             }
-            childrenQuery = childrenQuery.or('status.eq.ACTIVE,status.is.null');
+
+            if (!rpcSuccess) {
+                // Fallback: Legacy Fetch & Filter
+                let childrenQuery = supabase
+                    .from('storage_nodes')
+                    .select('*')
+                    .eq('project_id', resolvedProjectId)
+                    .or('status.eq.ACTIVE,status.is.null');
+
+                if (currentFolderId) {
+                    childrenQuery = childrenQuery.eq('parent_id', currentFolderId);
+                } else {
+                    childrenQuery = childrenQuery.is('parent_id', null);
+                }
+
+                const { data: rawNodes, error: childrenError } = await childrenQuery
+                    .order('type', { ascending: false })
+                    .order('name', { ascending: true });
+
+                if (childrenError) throw childrenError;
+
+                const latestNodesMap = new Map<string, any>();
+                (rawNodes || []).forEach((node: any) => {
+                    const existing = latestNodesMap.get(node.name);
+                    if (!existing || (node.version || 1) > (existing.version || 1)) {
+                        latestNodesMap.set(node.name, node);
+                    }
+                });
+
+                const allFilteredNodes = Array.from(latestNodesMap.values()).sort((a, b) => {
+                    if (a.type !== b.type) return b.type === 'FOLDER' ? -1 : 1;
+                    return a.name.localeCompare(b.name);
+                });
+
+                totalCount = allFilteredNodes.length;
+                nodes = allFilteredNodes.slice(offset, offset + limit);
+            }
         }
 
-        const { data: nodesData, error: childrenError } = await childrenQuery;
-        if (childrenError) throw childrenError;
-        const nodes = nodesData as any[];
-
-        // Version Control Filter: Show only the latest version of each file name
-        const latestNodesMap = new Map<string, any>();
-        (nodes || []).forEach(node => {
-            const existing = latestNodesMap.get(node.name);
-            if (!existing || (node.version || 1) > (existing.version || 1)) {
-                latestNodesMap.set(node.name, node);
-            }
-        });
-        const filteredNodes = Array.from(latestNodesMap.values())
-            .sort((a, b) => {
-                // Keep the original sorting: Folders first, then Name
-                if (a.type !== b.type) return b.type === 'FOLDER' ? 1 : -1;
-                return a.name.localeCompare(b.name);
-            });
-
-        // Fetch latest project stats for quota update
+        // Fetch latest project stats for quota update - Common for all views
         const { data: project } = await supabase
             .from('projects')
             .select('*')
@@ -146,13 +169,16 @@ export async function GET(request: NextRequest) {
             .single();
 
         return NextResponse.json({
-            nodes: filteredNodes,
+            nodes: nodes,
             currentFolderId: currentFolderId,
             breadcrumbs: chain,
-            project: project
+            project: project,
+            totalCount: totalCount,
+            hasMore: offset + nodes.length < totalCount
         });
 
     } catch (error: any) {
+        console.error("GET Drive Error:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }
@@ -490,11 +516,35 @@ export async function PATCH(request: NextRequest) {
             return NextResponse.json({ error: 'This project is in Read-Only mode.' }, { status: 403 });
         }
 
+        // 3. Update Node - Permission Logic Refined
         if (!isAdmin && !isOwner) {
-            return NextResponse.json({ error: 'Access Denied' }, { status: 403 });
+            // Check if user is a member of the project
+            const { data: memberData } = await supabase
+                .from('project_members')
+                .select('id')
+                .eq('project_id', node.project_id)
+                .eq('user_email', user.email)
+                .single();
+
+            const isMember = !!memberData;
+
+            if (!isMember) {
+                return NextResponse.json({ error: 'Access Denied' }, { status: 403 });
+            }
+
+            // Member can ONLY update share settings
+            if (name !== undefined && name !== node.name) {
+                return NextResponse.json({ error: 'Only owner can rename' }, { status: 403 });
+            }
+            if (parentId !== undefined && parentId !== node.parent_id) {
+                return NextResponse.json({ error: 'Only owner can move' }, { status: 403 });
+            }
+            if (status !== undefined && status !== node.status) {
+                return NextResponse.json({ error: 'Only owner can delete' }, { status: 403 });
+            }
         }
 
-        // 3. Update Node
+        // 4. Update Node
         const updates: any = {};
         if (status) {
             updates.status = status;

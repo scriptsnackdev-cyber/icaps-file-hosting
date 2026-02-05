@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Loader2, ArrowLeft, Save, FileText, Undo, Redo } from 'lucide-react';
 
-interface CreateNoteModalProps {
+export interface CreateNoteModalProps {
     isOpen: boolean;
     onClose: () => void;
     onCreate: (name: string, content: string) => Promise<void>;
@@ -9,7 +9,7 @@ interface CreateNoteModalProps {
     initialContent?: string;
 }
 
-export function CreateNoteModal({ isOpen, onClose, onCreate, initialName, initialContent }: CreateNoteModalProps) {
+export default function CreateNoteModal({ isOpen, onClose, onCreate, initialName, initialContent }: CreateNoteModalProps) {
     const [name, setName] = useState('Untitled document');
     const [content, setContent] = useState('');
     const [isCreating, setIsCreating] = useState(false);

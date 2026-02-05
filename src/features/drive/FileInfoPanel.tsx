@@ -3,13 +3,13 @@ import { StorageNode } from '@/types';
 import { X, FileText, Folder, Calendar, HardDrive, User } from 'lucide-react';
 import { format } from 'date-fns';
 
-interface FileInfoPanelProps {
+export interface FileInfoPanelProps {
     node: StorageNode | null;
     isOpen: boolean;
     onClose: () => void;
 }
 
-export function FileInfoPanel({ node, isOpen, onClose }: FileInfoPanelProps) {
+export default function FileInfoPanel({ node, isOpen, onClose }: FileInfoPanelProps) {
     if (!isOpen || !node) return null;
 
     return (

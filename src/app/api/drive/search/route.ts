@@ -45,49 +45,43 @@ export async function GET(request: NextRequest) {
             }
         }
 
-        // 2. Perform Search
-        // We match name case-insensitive
+        // 2. Perform Search with Path Resolution in one query
+        // We use a raw-ish select to include our custom function result
         const { data: results, error } = await supabase
             .from('storage_nodes')
-            .select('id, name, type, parent_id, updated_at, size, owner_email')
+            .select(`
+                id, 
+                name, 
+                type, 
+                parent_id, 
+                updated_at, 
+                size, 
+                owner_email,
+                path_tokens:resolve_node_path(id)
+            `)
             .eq('project_id', resolvedProjectId)
             .ilike('name', `%${query}%`)
-            .neq('status', 'DELETED_PENDING') // Exclude deleted
+            .neq('status', 'DELETED_PENDING')
+            .neq('status', 'TRASHED') // Also exclude trashed from main search
             .limit(20);
 
-        if (error) throw error;
+        if (error) {
+            console.error("Search query error:", error);
+            // Fallback: If function doesn't exist yet, retry without it
+            const { data: fallbackResults, error: fallbackError } = await supabase
+                .from('storage_nodes')
+                .select('id, name, type, parent_id, updated_at, size, owner_email')
+                .eq('project_id', resolvedProjectId)
+                .ilike('name', `%${query}%`)
+                .neq('status', 'DELETED_PENDING')
+                .neq('status', 'TRASHED')
+                .limit(20);
 
-        // 3. Resolve Paths
-        // We need the full breadcrumb path for "Open File Location"
-        const finalResults = await Promise.all((results || []).map(async (node) => {
-            let pathTokens: string[] = [];
-            let currentParentId = node.parent_id;
+            if (fallbackError) throw fallbackError;
+            return NextResponse.json(fallbackResults || []);
+        }
 
-            // Safety depth limit
-            let depth = 0;
-            while (currentParentId && depth < 10) {
-                const { data: parent } = await supabase
-                    .from('storage_nodes')
-                    .select('id, name, parent_id')
-                    .eq('id', currentParentId)
-                    .single();
-
-                if (parent) {
-                    pathTokens.unshift(parent.name);
-                    currentParentId = parent.parent_id;
-                } else {
-                    break;
-                }
-                depth++;
-            }
-
-            return {
-                ...node,
-                path_tokens: pathTokens
-            };
-        }));
-
-        return NextResponse.json(finalResults);
+        return NextResponse.json(results || []);
 
     } catch (error: any) {
         console.error("Search Error:", error);

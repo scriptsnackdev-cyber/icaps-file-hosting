@@ -77,3 +77,19 @@ export function useActionCache<T>(
 
     return { data, loading, error, refresh, setData };
 }
+
+/**
+ * Global prefetch helper to warm the cache
+ */
+export async function prefetchAction<T>(key: string, fetcher: () => Promise<T>) {
+    try {
+        const result = await fetcher();
+        if (typeof window !== 'undefined') {
+            localStorage.setItem(key, JSON.stringify(result));
+        }
+        return result;
+    } catch (e) {
+        console.warn(`Prefetch failed for key ${key}`, e);
+        return null;
+    }
+}

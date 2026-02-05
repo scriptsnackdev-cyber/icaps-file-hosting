@@ -9,26 +9,30 @@ import {
     Settings, MoreVertical, Upload, FolderUp, Lock, Globe, Users, X, Check,
     AlertCircle, ArrowUpCircle, RotateCcw, History, Pencil, Info, ArrowUp, ArrowDown
 } from 'lucide-react';
-const CreateNoteModal = dynamic(() => import('@/components/drive/CreateNoteModal').then(mod => mod.CreateNoteModal), { ssr: false });
-const MoveToModal = dynamic(() => import('@/components/drive/MoveToModal').then(mod => mod.MoveToModal), { ssr: false });
+const CreateNoteModal = dynamic<any>(() => import('@/features/drive/CreateNoteModal'), { ssr: false });
+const MoveToModal = dynamic<any>(() => import('@/features/drive/MoveToModal'), { ssr: false });
 import { StorageNode, Project } from '@/types';
 import { createClient } from '@/utils/supabase/client';
 import { format } from 'date-fns';
 import { useParams, useRouter, usePathname } from 'next/navigation';
-import { TaskProgress, AsyncTask } from '@/components/TaskProgress';
+import { TaskProgress, AsyncTask } from '@/features/drive/TaskProgress';
 import { v4 as uuidv4 } from 'uuid';
 import { useToast } from '@/contexts/ToastContext';
 import { useStorage } from '@/contexts/StorageContext';
 import { useActionContext } from '@/contexts/ActionContext';
 import { useActionCache } from '@/hooks/useActionCache';
 import { CACHE_KEYS } from '@/constants/cacheKeys';
+import { prefetchAction } from '@/hooks/useActionCache';
 
 import { useAuth } from '@/contexts/AuthContext';
 
-const FileInfoPanel = dynamic(() => import('@/components/drive/FileInfoPanel').then(mod => mod.FileInfoPanel), { ssr: false });
-import { PlannerEditor } from '@/components/drive/PlannerEditor';
+const FileInfoPanel = dynamic<any>(() => import('@/features/drive/FileInfoPanel'), { ssr: false });
+import { PlannerEditor } from '@/features/drive/PlannerEditor';
 import { InputModal } from '@/components/ui/InputModal';
 import { ConfirmModal } from '@/components/ui/ConfirmModal';
+import { DriveToolbar } from '@/features/drive/DriveToolbar';
+import { DriveNodesList } from '@/features/drive/DriveNodesList';
+import { DrivePreviewModal } from '@/features/drive/DrivePreviewModal';
 
 export default function DrivePage() {
     const params = useParams();
@@ -58,11 +62,22 @@ export default function DrivePage() {
     const [isInfoPanelOpen, setIsInfoPanelOpen] = useState(false);
     const [infoPanelNode, setInfoPanelNode] = useState<StorageNode | null>(null);
 
+    // Optimistic UI for Uploads
+    const [optimisticNodes, setOptimisticNodes] = useState<StorageNode[]>([]);
+
+    // Chunk Loading / Infinite Scroll
+    const [displayNodes, setDisplayNodes] = useState<StorageNode[]>([]);
+    const [offset, setOffset] = useState(0);
+    const [hasMore, setHasMore] = useState(false);
+    const [isFetchingMore, setIsFetchingMore] = useState(false);
+    const LIMIT = 50;
+
+
     // Hydrate from localStorage
     // Unified Fetcher for useActionCache
-    const fetchFolderData = useCallback(async () => {
+    const fetchFolderData = useCallback(async (currentOffset = 0) => {
         if (!urlProjectId) return null;
-        let url = `/api/drive?project=${encodeURIComponent(urlProjectId)}`;
+        let url = `/api/drive?project=${encodeURIComponent(urlProjectId)}&limit=${LIMIT}&offset=${currentOffset}`;
         if (folderPath && folderPath.length > 0) {
             url += `&path=${folderPath.map(s => encodeURIComponent(s)).join('/')}`;
         }
@@ -78,9 +93,14 @@ export default function DrivePage() {
         refresh: refreshFolder
     } = useActionCache<any>(
         CACHE_KEYS.NODES(urlProjectId || '', folderPathKey),
-        fetchFolderData,
+        () => fetchFolderData(0),
         {
             persist: true,
+            onSuccess: (data) => {
+                setDisplayNodes(data.nodes || []);
+                setHasMore(data.hasMore || false);
+                setOffset(data.nodes?.length || 0);
+            },
             onError: (err) => {
                 if (err.message === 'NOT_FOUND') {
                     showToast('Folder not found', 'error');
@@ -90,7 +110,38 @@ export default function DrivePage() {
         }
     );
 
-    const nodes: StorageNode[] = React.useMemo(() => folderData?.nodes || [], [folderData]);
+    // Reset display nodes when changing folder
+    useEffect(() => {
+        setDisplayNodes([]);
+        setOffset(0);
+        setHasMore(false);
+    }, [urlProjectId, folderPathKey]);
+
+    const loadMore = useCallback(async () => {
+        if (!hasMore || isFetchingMore || !urlProjectId) return;
+        setIsFetchingMore(true);
+        try {
+            const data = await fetchFolderData(offset);
+            if (data && data.nodes) {
+                setDisplayNodes(prev => [...prev, ...data.nodes]);
+                setOffset(prev => prev + data.nodes.length);
+                setHasMore(data.hasMore);
+            }
+        } catch (error) {
+            showToast('Failed to load more items', 'error');
+        } finally {
+            setIsFetchingMore(false);
+        }
+    }, [hasMore, isFetchingMore, urlProjectId, offset, fetchFolderData, showToast]);
+
+    const nodes: StorageNode[] = React.useMemo(() => {
+        const serverNodes = displayNodes;
+        // Filter out optimistic nodes that have already appeared on server
+        const filteredOptimistic = optimisticNodes.filter(o =>
+            !serverNodes.some((s: any) => s.name === o.name && s.type === o.type)
+        );
+        return [...filteredOptimistic, ...serverNodes];
+    }, [displayNodes, optimisticNodes]);
     const currentFolderId = folderData?.currentFolderId || null;
     const folderChain = React.useMemo(() => folderData?.breadcrumbs || [], [folderData]);
     const loading = folderLoading && !folderData;
@@ -144,6 +195,21 @@ export default function DrivePage() {
     const [isCreateNoteModalOpen, setIsCreateNoteModalOpen] = useState(false);
     const [editingNode, setEditingNode] = useState<StorageNode | null>(null);
     const [editInitialContent, setEditInitialContent] = useState<string>("");
+
+    const prefetchFolder = useCallback((folder: StorageNode) => {
+        if (!urlProjectId || !folder.name) return;
+        const currentPath = folderPath && folderPath.length > 0 ? folderPath.join('/') : '';
+        const newPath = currentPath ? `${currentPath}/${folder.name}` : folder.name;
+
+        prefetchAction(
+            CACHE_KEYS.NODES(urlProjectId, newPath),
+            async () => {
+                let url = `/api/drive?project=${encodeURIComponent(urlProjectId)}&path=${encodeURIComponent(newPath)}&limit=50`;
+                const res = await fetch(url);
+                return await res.json();
+            }
+        );
+    }, [urlProjectId, folderPath]);
 
     // Upload Menu State
     const [isUploadMenuOpen, setIsUploadMenuOpen] = useState(false);
@@ -531,21 +597,38 @@ export default function DrivePage() {
         setPreviewNode(node);
         setPreviewContent(null);
 
-        const isText = ['txt', 'md', 'json', 'js', 'ts', 'tsx', 'css', 'html', 'py', 'java', 'c', 'cpp', 'csv', 'xml', 'yml', 'yaml'].includes(ext);
+        const isText = ['txt', 'md', 'json', 'js', 'ts', 'tsx', 'css', 'html', 'py', 'java', 'c', 'cpp', 'csv', 'xml', 'yml', 'yaml', 'sql', 'log'].includes(ext);
 
         if (isText && node.r2_key) {
             setLoadingPreview(true);
             try {
                 // Fetch content
                 const url = `/api/files/${encodeURIComponent(node.r2_key)}?filename=${encodeURIComponent(node.name)}`;
+
+                // 1. Check HEAD first or just use Range header if supported (but R2 proxy might not support Range easily without setup)
+                // For now, we fetch and abort if too large during stream, or check Content-Length
                 const res = await fetch(url);
+
                 if (res.ok) {
-                    const text = await res.text();
-                    setPreviewContent(text);
+                    const size = Number(res.headers.get('Content-Length'));
+                    // Limit preview to 1MB
+                    if (size && size > 1024 * 1024) {
+                        setPreviewContent("File is too large to preview ( > 1MB). Please download to view.");
+                    } else {
+                        // Double protection: strict text limit
+                        const blob = await res.blob();
+                        if (blob.size > 1024 * 1024) {
+                            setPreviewContent("File is too large to preview ( > 1MB). Please download to view.");
+                        } else {
+                            const text = await blob.text();
+                            setPreviewContent(text);
+                        }
+                    }
                 } else {
                     setPreviewContent("Failed to load content.");
                 }
             } catch (e) {
+                console.error("Preview error", e);
                 setPreviewContent("Error loading content.");
             } finally {
                 setLoadingPreview(false);
@@ -560,8 +643,14 @@ export default function DrivePage() {
 
     const [isDownloading, setIsDownloading] = useState(false);
 
-    const handleDownloadCurrentFolder = () => {
+    const handleMainDownload = () => {
+        if (selectedNodeIds.size > 0) {
+            handleBulkDownload();
+            return;
+        }
+
         if (!currentFolderId) return;
+
         setIsDownloading(true);
         window.location.href = `/api/drive/zip?folderId=${currentFolderId}`;
         setTimeout(() => setIsDownloading(false), 2000);
@@ -659,42 +748,48 @@ export default function DrivePage() {
 
     // Original fetchNodes logic replaced by useActionCache and shim above
 
+    // Initial Fetch when ID changes
     useEffect(() => {
         fetchNodes();
+    }, [urlProjectId, folderPathKey, fetchNodes]);
 
-        // Background Polling every 5 seconds (Only when visible)
+    // Background Polling
+    useEffect(() => {
         const interval = setInterval(() => {
-            if (document.visibilityState === 'visible') {
+            if (document.visibilityState === 'visible' && !loading) {
                 fetchNodes(true, true);
             }
         }, 5000);
 
         return () => clearInterval(interval);
-    }, [urlProjectId, folderPathKey, fetchNodes]); // Fetch nodes whenever URL project or path changes
+    }, [fetchNodes, loading]); // loading included here is safe because this effect ONLY sets up the interval, it doesn't call fetchNodes immediately
 
     // Prefetch next level folders for smoother navigation (A->B->C->D pattern)
-    // Prefetch next level folders
     useEffect(() => {
         if (!nodes.length || !urlProjectId) return;
 
+        let isMounted = true;
         const prefetch = async () => {
-            const folderNodes = nodes.filter(n => n.type === 'FOLDER').slice(0, 5);
+            // Limit to first 3 folders to save bandwidth
+            const folderNodes = nodes.filter(n => n.type === 'FOLDER').slice(0, 3);
 
             for (const folder of folderNodes) {
+                if (!isMounted) break; // Stop if unmounted/dependencies changed
+
                 const childPathParts = [...(folderPath || []), folder.name];
                 const childPathKey = childPathParts.join('/');
-                // Use CACHE_KEYS
                 const cacheKey = CACHE_KEYS.NODES(urlProjectId, childPathKey);
+
+                // Skip if already cached recently (simple check could be added here if we had timestamps)
 
                 try {
                     const pathParam = childPathParts.map(s => encodeURIComponent(s)).join('/');
                     const res = await fetch(`/api/drive?project=${encodeURIComponent(urlProjectId)}&path=${pathParam}`);
+                    if (!isMounted) break;
+
                     if (res.ok) {
                         const data = await res.json();
-                        // Note: We are caching 'data' (FolderResponse) instead of 'data.nodes'
-                        // because our hook expects the full object.
-                        // Existing code cached 'data.nodes'. 
-                        // Migration note: Old cache might be incompatible, but we are overwriting it.
+                        if (!isMounted) break;
                         localStorage.setItem(cacheKey, JSON.stringify(data));
                     }
                 } catch (e) {
@@ -702,7 +797,14 @@ export default function DrivePage() {
                 }
             }
         };
-        prefetch(); // call it
+
+        // Delay prefetch slightly to prioritize main content loading
+        const timer = setTimeout(prefetch, 1000);
+
+        return () => {
+            isMounted = false;
+            clearTimeout(timer);
+        };
     }, [nodes, urlProjectId, folderPath]);
 
 
@@ -1169,7 +1271,7 @@ export default function DrivePage() {
             return { id, file, name: cleanName };
         });
 
-        // Add to UI
+        // Add to UI (Tasks)
         const newUiTasks: AsyncTask[] = fileTasks.map(t => ({
             id: t.id,
             type: 'UPLOAD',
@@ -1177,6 +1279,23 @@ export default function DrivePage() {
             status: 'PENDING'
         }));
         setTasks(prev => [...prev, ...newUiTasks]);
+
+        // Add to UI (Optimistic Nodes)
+        const newOptimisticNodes: StorageNode[] = fileTasks.map(t => ({
+            id: `optimistic-${t.id}`,
+            name: t.name,
+            type: 'FILE',
+            size: t.file.size,
+            updated_at: new Date().toISOString(),
+            owner_email: userEmail || 'You',
+            parent_id: parentIdResolver(t.file) || currentFolderId,
+            project_id: currentProject?.id || '',
+            is_trashed: false,
+            version: 1,
+            created_at: new Date().toISOString(),
+            sharing_scope: 'PRIVATE'
+        }));
+        setOptimisticNodes(prev => [...prev, ...newOptimisticNodes]);
 
         // Process
         for (let i = 0; i < files.length; i++) {
@@ -1222,6 +1341,7 @@ export default function DrivePage() {
             isUploadingRef.current = false;
             fetchNodes(true);
             refreshStorage();
+            setOptimisticNodes([]);
         }
     };
 
@@ -1580,33 +1700,19 @@ export default function DrivePage() {
     // Sharing Top Bar
     // Sharing Top Bar
     const handleShareClick = async () => {
-        if (!currentFolderId) {
-            showToast("Cannot share root drive. Please enter a folder.", 'error');
+        let targetId = null;
+        if (selectedNodeIds.size === 1) {
+            targetId = Array.from(selectedNodeIds)[0];
+        } else {
+            targetId = currentFolderId;
+        }
+
+        if (!targetId) {
+            showToast("Cannot share root drive. Please select a file or enter a folder.", 'error');
             return;
         }
 
-        try {
-            // Fetch current node settings
-            const { data, error } = await supabase
-                .from('storage_nodes')
-                .select('sharing_scope, share_password')
-                .eq('id', currentFolderId)
-                .single();
-
-            if (error) throw error;
-
-            setShareNodeId(currentFolderId);
-            setShareConfig({
-                scope: (data.sharing_scope as 'PRIVATE' | 'PUBLIC') || 'PRIVATE',
-                passwordEnabled: !!data.share_password,
-                password: data.share_password || ''
-            });
-            setIsShareModalOpen(true);
-
-        } catch (e) {
-            console.error(e);
-            showToast("Failed to fetch share settings", "error");
-        }
+        await openShareModalForNode(targetId);
     };
 
     const handleRenameSubmit = async () => {
@@ -1951,452 +2057,69 @@ export default function DrivePage() {
 
 
 
-                        {/* Navbar / Breadcrumbs */}
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8 bg-white p-4 rounded-xl border border-slate-200 shadow-sm relative z-20">
-                            {/* Breadcrumbs */}
-                            <div className="flex items-center gap-2 text-sm text-slate-500 overflow-x-auto my-2 sm:my-0">
-                                <button
-                                    onClick={() => navigateUp(-1)}
-                                    onDragOver={(e) => {
-                                        if (draggedNode && draggedNode.parent_id !== null) { // Can drop if not already at root
-                                            e.preventDefault();
-                                            e.stopPropagation();
-                                            // Visual feedback could be added here
-                                            e.dataTransfer.dropEffect = 'move';
-                                        }
-                                    }}
-                                    onDrop={async (e) => {
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                        if (draggedNode && draggedNode.parent_id !== null) {
-                                            // Move to Root
-                                            if (selectedNodeIds.has(draggedNode.id)) {
-                                                // Bulk Move
-                                                const itemsToMove = nodes.filter(n => selectedNodeIds.has(n.id));
-                                                for (const item of itemsToMove) {
-                                                    if (item.parent_id !== null) {
-                                                        await handleMoveNode(item, null);
-                                                    }
-                                                }
-                                                showToast(`Moved ${itemsToMove.length} items`, "success");
-                                            } else {
-                                                await handleMoveNode(draggedNode, null);
-                                            }
-                                            setDraggedNode(null);
-                                            setSelectedNodeIds(new Set());
-                                        }
-                                    }}
-                                    className={`flex items-center gap-1 hover:text-blue-600 px-2 py-1 rounded-md transition-colors ${!slug || slug.length === 0 ? 'bg-blue-50 text-blue-700 font-semibold' : ''}`}
-                                >
-                                    <HomeIcon className="w-4 h-4" />
-                                    <span>My Files</span>
-                                </button>
-                                {breadcrumbsToRender.map((f, i) => (
-                                    <React.Fragment key={f.id}>
-                                        <ChevronRight className="w-4 h-4 text-slate-300" />
-                                        <button
-                                            onClick={() => navigateUp(i)}
-                                            onDragOver={(e) => {
-                                                // Allow drop if draggedNode is not this folder and not its parent (already here)
-                                                if (draggedNode && draggedNode.id !== f.id && draggedNode.parent_id !== f.id) {
-                                                    e.preventDefault();
-                                                    e.stopPropagation();
-                                                    e.dataTransfer.dropEffect = 'move';
-                                                }
-                                            }}
-                                            onDrop={async (e) => {
-                                                e.preventDefault();
-                                                e.stopPropagation();
-                                                if (draggedNode && draggedNode.id !== f.id && draggedNode.parent_id !== f.id) {
-                                                    // Move content to this folder
-                                                    if (selectedNodeIds.has(draggedNode.id)) {
-                                                        // Bulk Move
-                                                        const itemsToMove = nodes.filter(n => selectedNodeIds.has(n.id));
-                                                        for (const item of itemsToMove) {
-                                                            if (item.id !== f.id && item.parent_id !== f.id) {
-                                                                await handleMoveNode(item, f.id);
-                                                            }
-                                                        }
-                                                        showToast(`Moved ${itemsToMove.length} items`, "success");
-                                                    } else {
-                                                        await handleMoveNode(draggedNode, f.id);
-                                                    }
-                                                    setDraggedNode(null);
-                                                    setSelectedNodeIds(new Set());
-                                                }
-                                            }}
-                                            className={`hover:text-blue-600 px-2 py-1 rounded-md transition-colors whitespace-nowrap ${i === breadcrumbsToRender.length - 1 ? 'bg-blue-50 text-blue-700 font-semibold' : ''}`}
-                                        >
-                                            {f.name}
-                                        </button>
-                                    </React.Fragment>
-                                ))}
-                            </div>
+                        <DriveToolbar
+                            currentProject={currentProject}
+                            currentFolderId={currentFolderId}
+                            selectedNodeIds={selectedNodeIds}
+                            isAdmin={isAdmin}
+                            userId={userId}
+                            userEmail={userEmail}
+                            slug={slug}
+                            breadcrumbsToRender={breadcrumbsToRender}
+                            isDownloading={isDownloading}
+                            isUploadMenuOpen={isUploadMenuOpen}
+                            setIsUploadMenuOpen={setIsUploadMenuOpen}
+                            draggedNode={draggedNode}
+                            setDraggedNode={setDraggedNode}
+                            setSelectedNodeIds={setSelectedNodeIds}
+                            handleShareClick={handleShareClick}
+                            handleMainDownload={handleMainDownload}
+                            handleCreateFolderClick={handleCreateFolderClick}
+                            setIsCreateNoteModalOpen={setIsCreateNoteModalOpen}
+                            handleCreatePlannerClick={handleCreatePlannerClick}
+                            triggerFolderUploadSelection={triggerFolderUploadSelection}
+                            fileInputRef={fileInputRef}
+                            navigateUp={navigateUp}
+                            handleMoveNode={handleMoveNode}
+                            nodes={nodes}
+                        />
 
-                            {/* Controls */}
-                            <div className="flex bg-slate-100 p-1 rounded-lg gap-1 relative">
-                                <button
-                                    onClick={handleShareClick}
-                                    disabled={!currentFolderId}
-                                    className="flex items-center gap-2 px-3 py-1.5 bg-white text-slate-700 rounded-md shadow-sm border border-slate-200 hover:text-blue-600 hover:border-blue-200 transition-all text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                                >
-                                    <Share2 className="w-4 h-4" />
-                                    Share
-                                </button>
-                                <button
-                                    onClick={handleDownloadCurrentFolder}
-                                    disabled={!currentFolderId || isDownloading}
-                                    className="flex items-center gap-2 px-3 py-1.5 bg-white text-slate-700 rounded-md shadow-sm border border-slate-200 hover:text-blue-600 hover:border-blue-200 transition-all text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                                >
-                                    {isDownloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                                    Download
-                                </button>
 
-                                {currentProject?.settings?.read_only && !isAdmin ? (
-                                    <div className="flex items-center gap-2 px-4 py-1.5 bg-amber-50 text-amber-600 rounded-md border border-amber-200 text-xs font-bold uppercase tracking-wider">
-                                        <Lock className="w-3.5 h-3.5" />
-                                        Locked
-                                    </div>
-                                ) : (
-                                    <>
-                                        <button
-                                            onClick={handleCreateFolderClick}
-                                            className="flex items-center gap-2 px-3 py-1.5 bg-white text-slate-700 rounded-md shadow-sm border border-slate-200 hover:text-blue-600 hover:border-blue-200 transition-all text-sm font-medium"
-                                        >
-                                            <FolderPlus className="w-4 h-4" />
-                                            New Folder
-                                        </button>
+                        <DriveNodesList
+                            nodes={nodes}
+                            sortedNodes={sortedNodes}
+                            loading={loading}
+                            isAdmin={isAdmin}
+                            userEmail={userEmail}
+                            selectedNodeIds={selectedNodeIds}
+                            dragOverNodeId={dragOverNodeId}
+                            draggedNode={draggedNode}
+                            sortConfig={sortConfig}
+                            isCreatingFolder={isCreatingFolder}
+                            newFolderName={newFolderName}
+                            newFolderInputRef={newFolderInputRef}
+                            fileInputRef={fileInputRef}
+                            toggleSelectAll={toggleSelectAll}
+                            handleSort={handleSort}
+                            setNewFolderName={setNewFolderName}
+                            handleNewFolderKeyDown={handleNewFolderKeyDown}
+                            confirmCreateFolder={confirmCreateFolder}
+                            navigateToFolder={navigateToFolder}
+                            handlePreview={handlePreview}
+                            handleContextMenu={handleContextMenu}
+                            toggleNodeSelection={toggleNodeSelection}
+                            handleCreateFolderClick={handleCreateFolderClick}
+                            setDraggedNode={setDraggedNode}
+                            setDragOverNodeId={setDragOverNodeId}
+                            handleMoveNode={handleMoveNode}
+                            setSelectedNodeIds={setSelectedNodeIds}
+                            showToast={showToast}
+                            prefetchFolder={prefetchFolder}
+                            loadMore={loadMore}
+                            hasMore={hasMore}
+                            isFetchingMore={isFetchingMore}
+                        />
 
-                                        {/* Upload Menu */}
-                                        <div className="relative">
-                                            <button
-                                                onClick={(e) => { e.stopPropagation(); setIsUploadMenuOpen(!isUploadMenuOpen); }}
-                                                className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white rounded-md shadow-sm hover:bg-blue-700 transition-all text-sm font-medium"
-                                            >
-                                                <Plus className="w-4 h-4" />
-                                                New
-                                            </button>
-
-                                            {/* Dropdown */}
-                                            {isUploadMenuOpen && (
-                                                <div className="absolute top-full right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-100 overflow-hidden z-[60] animate-in fade-in zoom-in-95 duration-200">
-                                                    <button
-                                                        onClick={() => { setIsCreateNoteModalOpen(true); setIsUploadMenuOpen(false); }}
-                                                        className="w-full text-left px-4 py-3 hover:bg-slate-50 text-sm font-medium text-slate-700 flex items-center gap-3 border-b border-slate-50"
-                                                    >
-                                                        <FileText className="w-4 h-4 text-emerald-500" />
-                                                        New Text File
-                                                    </button>
-                                                    <button
-                                                        onClick={handleCreatePlannerClick}
-                                                        className="w-full text-left px-4 py-3 hover:bg-slate-50 text-sm font-medium text-slate-700 flex items-center gap-3 border-b border-slate-50"
-                                                    >
-                                                        <Calendar className="w-4 h-4 text-indigo-500" />
-                                                        New Planner
-                                                    </button>
-                                                    <button
-                                                        onClick={() => fileInputRef.current?.click()}
-                                                        className="w-full text-left px-4 py-3 hover:bg-slate-50 text-sm font-medium text-slate-700 flex items-center gap-3"
-                                                    >
-                                                        <Upload className="w-4 h-4 text-blue-500" />
-                                                        Upload Files
-                                                    </button>
-                                                    <button
-                                                        onClick={triggerFolderUploadSelection}
-                                                        className="w-full text-left px-4 py-3 hover:bg-slate-50 text-sm font-medium text-slate-700 flex items-center gap-3"
-                                                    >
-                                                        <FolderUp className="w-4 h-4 text-indigo-500" />
-                                                        Upload Folder
-                                                    </button>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </>
-                                )}
-
-                                {/* Hidden Inputs */}
-                                <input
-                                    ref={fileInputRef}
-                                    type="file"
-                                    className="hidden"
-                                    onChange={handleFileUploadChange}
-                                    multiple
-                                />
-                                <input
-                                    ref={folderInputRef}
-                                    type="file"
-                                    className="hidden"
-                                    onChange={handleFolderInputCreate}
-                                    {...({ webkitdirectory: "", directory: "" } as any)}
-                                />
-                            </div>
-                        </div>
-
-                        {/* Content */}
-                        {loading ? (
-                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden z-0 relative">
-                                <table className="w-full text-left">
-                                    <thead className="bg-slate-50 border-b border-slate-100 text-xs font-semibold uppercase text-slate-500 tracking-wider">
-                                        <tr>
-                                            <th className="px-6 py-4 w-[50px]"><div className="h-4 w-4 bg-slate-200 rounded animate-pulse" /></th>
-                                            <th className="px-6 py-4"><div className="h-4 w-20 bg-slate-200 rounded animate-pulse" /></th>
-                                            <th className="px-6 py-4"><div className="h-4 w-16 bg-slate-200 rounded animate-pulse" /></th>
-                                            <th className="px-6 py-4"><div className="h-4 w-24 bg-slate-200 rounded animate-pulse" /></th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-100">
-                                        {[...Array(5)].map((_, i) => (
-                                            <tr key={i}>
-                                                <td className="px-6 py-3"><div className="h-4 w-4 bg-slate-100 rounded animate-pulse" /></td>
-                                                <td className="px-6 py-3">
-                                                    <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 bg-slate-100 rounded-lg animate-pulse" />
-                                                        <div className="space-y-2">
-                                                            <div className="h-4 w-40 bg-slate-100 rounded animate-pulse" />
-                                                            <div className="h-3 w-12 bg-slate-50 rounded animate-pulse" />
-                                                        </div>
-                                                    </div>
-                                                </td>
-                                                <td className="px-6 py-3"><div className="h-8 w-8 rounded-full bg-slate-100 animate-pulse" /></td>
-                                                <td className="px-6 py-3"><div className="h-4 w-24 bg-slate-100 rounded animate-pulse" /></td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        ) : (
-                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden z-0 relative">
-                                <table className="w-full text-left">
-                                    <thead className="sticky top-0 z-30 bg-white/95 backdrop-blur-sm border-b border-slate-100 text-xs font-semibold uppercase text-slate-500 tracking-wider shadow-sm">
-                                        <tr>
-                                            <th className="px-6 py-4 w-[50px]">
-                                                <input
-                                                    type="checkbox"
-                                                    onChange={toggleSelectAll}
-                                                    checked={selectedNodeIds.size > 0 && selectedNodeIds.size === nodes.length}
-                                                    ref={input => {
-                                                        if (input) {
-                                                            input.indeterminate = selectedNodeIds.size > 0 && selectedNodeIds.size < nodes.length;
-                                                        }
-                                                    }}
-                                                    className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
-                                                />
-                                            </th>
-                                            <th className="px-6 py-4 cursor-pointer hover:bg-slate-100 transition-colors group select-none" onClick={() => handleSort('name')}>
-                                                <div className="flex items-center gap-1">
-                                                    Name
-                                                    {sortConfig.key === 'name' && (
-                                                        sortConfig.direction === 'asc' ? <ArrowUp className="w-4 h-4 text-blue-500" /> : <ArrowDown className="w-4 h-4 text-blue-500" />
-                                                    )}
-                                                </div>
-                                            </th>
-                                            <th className="px-6 py-4">Owner</th>
-                                            <th className="px-6 py-4 cursor-pointer hover:bg-slate-100 transition-colors group select-none" onClick={() => handleSort('updated_at')}>
-                                                <div className="flex items-center gap-1">
-                                                    Modified
-                                                    {sortConfig.key === 'updated_at' && (
-                                                        sortConfig.direction === 'asc' ? <ArrowUp className="w-4 h-4 text-blue-500" /> : <ArrowDown className="w-4 h-4 text-blue-500" />
-                                                    )}
-                                                </div>
-                                            </th>
-
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-100">
-                                        {/* New Folder Input Row */}
-                                        {isCreatingFolder && (
-                                            <tr className="bg-blue-50/50 animate-in fade-in duration-300">
-                                                <td className="px-6 py-3"></td>
-                                                <td className="px-6 py-3">
-                                                    <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-lg flex items-center justify-center shadow-sm">
-                                                            <Folder className="w-5 h-5 fill-current" />
-                                                        </div>
-                                                        <div className="flex-1">
-                                                            <input
-                                                                ref={newFolderInputRef}
-                                                                type="text"
-                                                                value={newFolderName}
-                                                                onChange={(e) => setNewFolderName(e.target.value)}
-                                                                onKeyDown={handleNewFolderKeyDown}
-                                                                onBlur={() => confirmCreateFolder()}
-                                                                className="w-full max-w-sm px-3 py-1.5 text-sm border border-blue-400 bg-white rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700"
-                                                                placeholder="Folder Name"
-                                                            />
-                                                        </div>
-                                                    </div>
-                                                </td>
-                                                <td colSpan={3} className="px-6 py-3 text-xs text-slate-400">
-                                                    Press Enter to create, Esc to cancel
-                                                </td>
-                                            </tr>
-                                        )}
-
-                                        {nodes.length === 0 && !isCreatingFolder && (
-                                            <tr>
-                                                <td colSpan={5} className="px-6 py-24 text-center">
-                                                    <div className="flex flex-col items-center justify-center">
-                                                        <div className="w-20 h-20 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mb-6 animate-in zoom-in-50 duration-300">
-                                                            <Cloud className="w-10 h-10" />
-                                                        </div>
-                                                        <h3 className="text-xl font-bold text-slate-800 mb-2">It's a bit empty here</h3>
-                                                        <p className="text-slate-500 mb-8 max-w-sm mx-auto">
-                                                            Drag and drop files directly to this page or use the button below to get started.
-                                                        </p>
-                                                        <div className="flex gap-4">
-                                                            <button
-                                                                onClick={() => fileInputRef.current?.click()}
-                                                                className="px-6 py-2.5 bg-blue-600 text-white font-medium rounded-xl hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-200 transition-all flex items-center gap-2"
-                                                            >
-                                                                <Upload className="w-4 h-4" />
-                                                                Upload Files
-                                                            </button>
-                                                            <button
-                                                                onClick={handleCreateFolderClick}
-                                                                className="px-6 py-2.5 bg-white border border-slate-200 text-slate-700 font-medium rounded-xl hover:bg-slate-50 hover:border-slate-300 transition-all flex items-center gap-2"
-                                                            >
-                                                                <FolderPlus className="w-4 h-4" />
-                                                                New Folder
-                                                            </button>
-                                                        </div>
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                        )}
-                                        {sortedNodes.map(node => (
-                                            <tr
-                                                key={node.id}
-                                                draggable={isAdmin || node.owner_email === userEmail}
-                                                onDragStart={(e) => {
-                                                    if (!(isAdmin || node.owner_email === userEmail)) {
-                                                        e.preventDefault();
-                                                        return;
-                                                    }
-                                                    setDraggedNode(node);
-                                                    e.dataTransfer.effectAllowed = 'move';
-                                                }}
-                                                onDragOver={(e) => {
-                                                    if (draggedNode && node.type === 'FOLDER' && node.id !== draggedNode.id) {
-                                                        e.preventDefault(); // Allow drop
-                                                        e.stopPropagation();
-                                                        setDragOverNodeId(node.id);
-                                                        e.dataTransfer.dropEffect = 'move';
-                                                    }
-                                                }}
-                                                onDragLeave={(e) => {
-                                                    if (dragOverNodeId === node.id) {
-                                                        setDragOverNodeId(null);
-                                                    }
-                                                }}
-                                                onDrop={async (e) => {
-                                                    e.preventDefault();
-                                                    e.stopPropagation(); // Stop main drop zone from triggering
-                                                    setDragOverNodeId(null);
-                                                    if (draggedNode && node.type === 'FOLDER' && node.id !== draggedNode.id) {
-                                                        if (selectedNodeIds.has(draggedNode.id)) {
-                                                            // Bulk Move into the dropped folder
-                                                            const itemsToMove = nodes.filter(n => selectedNodeIds.has(n.id));
-                                                            for (const item of itemsToMove) {
-                                                                if (item.id !== node.id) { // Avoid moving folder into self if happens
-                                                                    await handleMoveNode(item, node.id);
-                                                                }
-                                                            }
-                                                            showToast(`Moved ${itemsToMove.length} items`, "success");
-                                                        } else {
-                                                            handleMoveNode(draggedNode, node.id);
-                                                        }
-                                                        setDraggedNode(null);
-                                                        setSelectedNodeIds(new Set());
-                                                    }
-                                                }}
-                                                className={`group transition-all cursor-pointer duration-200 ${dragOverNodeId === node.id ? 'bg-blue-100 ring-2 ring-inset ring-blue-500 z-10' : 'hover:bg-blue-50/30'}`}
-                                                onClick={() => {
-                                                    if (node.type === 'FOLDER') {
-                                                        navigateToFolder(node);
-                                                    } else {
-                                                        handlePreview(node);
-                                                    }
-                                                }}
-                                                onContextMenu={(e) => handleContextMenu(e, node)}
-                                            >
-                                                <td className="px-6 py-3 relative z-20">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={selectedNodeIds.has(node.id)}
-                                                        onChange={(e) => {
-                                                            e.stopPropagation();
-                                                            toggleNodeSelection(node.id);
-                                                        }}
-                                                        onClick={(e) => e.stopPropagation()}
-                                                        className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer w-4 h-4"
-                                                    />
-                                                </td>
-                                                <td className="px-6 py-3">
-                                                    <div className="flex items-center gap-4">
-                                                        {node.type === 'FOLDER' ? (
-                                                            <div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-lg flex items-center justify-center shadow-sm group-hover:bg-indigo-100 group-hover:scale-105 transition-all">
-                                                                <Folder className="w-5 h-5 fill-current" />
-                                                            </div>
-                                                        ) : (
-                                                            (() => {
-                                                                const ext = node.name.split('.').pop()?.toLowerCase() || '';
-                                                                let colorClass = "bg-blue-50 text-blue-600 group-hover:bg-blue-100";
-                                                                if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) colorClass = "bg-purple-50 text-purple-600 group-hover:bg-purple-100";
-                                                                else if (['mp4', 'webm', 'mov', 'avi'].includes(ext)) colorClass = "bg-orange-50 text-orange-600 group-hover:bg-orange-100";
-                                                                else if (['mp3', 'wav', 'ogg'].includes(ext)) colorClass = "bg-pink-50 text-pink-600 group-hover:bg-pink-100";
-                                                                else if (['pdf'].includes(ext)) colorClass = "bg-red-50 text-red-600 group-hover:bg-red-100";
-                                                                else if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) colorClass = "bg-amber-50 text-amber-600 group-hover:bg-amber-100";
-                                                                else if (['xls', 'xlsx', 'csv'].includes(ext)) colorClass = "bg-emerald-50 text-emerald-600 group-hover:bg-emerald-100";
-                                                                else if (['doc', 'docx'].includes(ext)) colorClass = "bg-blue-50 text-blue-600 group-hover:bg-blue-100";
-                                                                else if (['ppt', 'pptx'].includes(ext)) colorClass = "bg-rose-50 text-rose-600 group-hover:bg-rose-100";
-                                                                else if (['js', 'ts', 'tsx', 'jsx', 'json', 'py', 'java', 'html', 'css', 'php', 'c', 'cpp'].includes(ext)) colorClass = "bg-slate-100 text-slate-600 group-hover:bg-slate-200 border border-slate-200";
-                                                                else if (ext === 'splan') colorClass = "bg-indigo-50 text-indigo-600 group-hover:bg-indigo-100 border border-indigo-100";
-
-                                                                return (
-                                                                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm transition-all group-hover:scale-105 ${colorClass}`}>
-                                                                        {ext === 'splan' ? <Calendar className="w-5 h-5" /> : <FileText className="w-5 h-5" />}
-                                                                    </div>
-                                                                );
-                                                            })()
-                                                        )}
-                                                        <div>
-                                                            <p className="font-medium text-slate-700 group-hover:text-blue-700 transition-colors flex items-center gap-2">
-                                                                {node.name}
-                                                                {node.version && node.version > 1 && (
-                                                                    <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-600 border border-blue-200">
-                                                                        v{node.version}
-                                                                    </span>
-                                                                )}
-                                                            </p>
-                                                            {node.type === 'FILE' && (
-                                                                <p className="text-xs text-slate-400">{(node.size! / 1024).toFixed(1)} KB</p>
-                                                            )}
-                                                        </div>
-                                                    </div>
-                                                </td>
-                                                <td className="px-6 py-3 text-sm text-slate-600">
-                                                    <div className="flex items-center gap-2">
-                                                        <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-slate-200 to-slate-300 flex items-center justify-center text-[10px] font-bold text-slate-600 border border-white shadow-sm">
-                                                            {node.owner_email?.[0].toUpperCase()}
-                                                        </div>
-                                                        <span className="truncate max-w-[120px] opacity-80">{node.owner_email?.split('@')[0]}</span>
-                                                    </div>
-                                                </td>
-                                                <td className="px-6 py-3 text-sm text-slate-500 font-mono text-xs">
-                                                    {(() => {
-                                                        const date = new Date(node.updated_at);
-                                                        const isToday = date.toDateString() === new Date().toDateString();
-                                                        return isToday
-                                                            ? `Today ${format(date, 'HH:mm')}`
-                                                            : format(date, 'MMM d, yyyy');
-                                                    })()}
-                                                </td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        )}
                     </>
                 )}
             </main>
@@ -2436,88 +2159,17 @@ export default function DrivePage() {
                 )
             }
 
-            {/* Preview Modal */}
-            {
-                previewNode && (
-                    <div className="fixed inset-0 bg-black/90 z-[100] flex items-center justify-center animate-in fade-in duration-200 backdrop-blur-sm" onClick={closePreview}>
-                        <button onClick={closePreview} className="absolute top-6 right-6 p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors z-50">
-                            <X className="w-6 h-6" />
-                        </button>
-
-                        <div className="w-full h-full max-w-6xl max-h-[90vh] p-4 flex flex-col justify-center items-center" onClick={e => e.stopPropagation()}>
-
-                            <div className="w-full flex justify-between items-center mb-4 px-4">
-                                <h3 className="text-white font-medium text-lg truncate max-w-xl">{previewNode.name}</h3>
-                                <div className="flex items-center gap-3">
-                                    {['txt', 'md', 'json', 'js', 'ts', 'tsx', 'css', 'html', 'py', 'java', 'c', 'cpp'].includes(previewNode.name.split('.').pop()?.toLowerCase() || '') && (isAdmin || previewNode.owner_email === userEmail) && (
-                                        <button
-                                            onClick={() => {
-                                                setEditingNode(previewNode);
-                                                setEditInitialContent(previewContent || "");
-                                                closePreview();
-                                                setIsCreateNoteModalOpen(true);
-                                            }}
-                                            className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-medium transition-colors"
-                                        >
-                                            <Pencil className="w-4 h-4" />
-                                            Edit
-                                        </button>
-                                    )}
-                                    <button
-                                        onClick={() => window.open(`/api/files/${encodeURIComponent(previewNode.r2_key!)}?filename=${encodeURIComponent(previewNode.name)}`)}
-                                        className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
-                                    >
-                                        <Download className="w-4 h-4" />
-                                        Download
-                                    </button>
-                                </div>
-                            </div>
-
-                            {/* Content Area */}
-                            <div className="flex-1 w-full bg-slate-900 rounded-xl overflow-hidden shadow-2xl relative flex items-center justify-center border border-slate-700">
-                                {(() => {
-                                    const ext = previewNode.name.split('.').pop()?.toLowerCase() || '';
-                                    const url = `/api/files/${encodeURIComponent(previewNode.r2_key!)}?filename=${encodeURIComponent(previewNode.name)}`;
-
-                                    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) {
-                                        return (
-                                            /* eslint-disable-next-line @next/next/no-img-element */
-                                            <img src={url} alt={previewNode.name} className="max-w-full max-h-full object-contain" />
-                                        );
-                                    } else if (['mp4', 'webm', 'mov'].includes(ext)) {
-                                        return (
-                                            <video src={url} controls className="max-w-full max-h-full" />
-                                        );
-                                    } else if (ext === 'pdf') {
-                                        return (
-                                            <iframe src={url} className="w-full h-full" title="PDF Preview" />
-                                        );
-                                    } else if (['txt', 'md', 'json', 'js', 'ts', 'tsx', 'css', 'html', 'py', 'java', 'c', 'cpp', 'csv', 'xml', 'yml', 'yaml'].includes(ext)) {
-                                        return loadingPreview ? (
-                                            <div className="flex flex-col items-center gap-3 text-slate-400">
-                                                <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
-                                                <span>Loading content...</span>
-                                            </div>
-                                        ) : (
-                                            <div className="w-full h-full overflow-auto p-6 bg-[#1e1e1e] text-slate-300 font-mono text-sm custom-scrollbar">
-                                                <pre className="whitespace-pre-wrap break-words">{previewContent}</pre>
-                                            </div>
-                                        );
-                                    } else {
-                                        return (
-                                            <div className="text-center text-slate-400">
-                                                <FileText className="w-16 h-16 mx-auto mb-4 opacity-50" />
-                                                <p className="text-lg font-medium">Preview not available</p>
-                                                <p className="text-sm mt-2">Download the file to view its content</p>
-                                            </div>
-                                        );
-                                    }
-                                })()}
-                            </div>
-                        </div>
-                    </div>
-                )
-            }
+            <DrivePreviewModal
+                previewNode={previewNode}
+                previewContent={previewContent}
+                loadingPreview={loadingPreview}
+                isAdmin={isAdmin}
+                userEmail={userEmail}
+                closePreview={closePreview}
+                setEditingNode={setEditingNode}
+                setEditInitialContent={setEditInitialContent}
+                setIsCreateNoteModalOpen={setIsCreateNoteModalOpen}
+            />
 
 
 
@@ -3483,7 +3135,7 @@ export default function DrivePage() {
                 onClose={() => setIsMoveToModalOpen(false)}
                 nodesToMove={nodesToMove}
                 projectId={currentProject?.id || ''}
-                onMove={async (targetId) => {
+                onMove={async (targetId: string | null) => {
                     // Handle move
                     for (const node of nodesToMove) {
                         await handleMoveNode(node, targetId);

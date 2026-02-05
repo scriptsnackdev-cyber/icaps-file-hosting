@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { StorageNode, Project } from '@/types';
 import { Folder, ChevronRight, ArrowLeft, Loader2, Check } from 'lucide-react';
 
-interface MoveToModalProps {
+export interface MoveToModalProps {
     isOpen: boolean;
     onClose: () => void;
     nodesToMove: StorageNode[]; // Supports bulk
@@ -10,7 +10,7 @@ interface MoveToModalProps {
     onMove: (targetFolderId: string | null) => Promise<void>; // null for root
 }
 
-export function MoveToModal({ isOpen, onClose, nodesToMove, projectId, onMove }: MoveToModalProps) {
+export default function MoveToModal({ isOpen, onClose, nodesToMove, projectId, onMove }: MoveToModalProps) {
     const [currentBoundFolderId, setCurrentBoundFolderId] = useState<string | null>(null);
     const [folders, setFolders] = useState<StorageNode[]>([]);
     const [loading, setLoading] = useState(false);
