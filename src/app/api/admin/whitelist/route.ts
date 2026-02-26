@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/utils/supabase/server';
 
-export async function GET(request: NextRequest) {
+export async function GET() {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
 
@@ -18,8 +18,8 @@ export async function GET(request: NextRequest) {
         if (error) throw error;
 
         return NextResponse.json(whitelist);
-    } catch (e: any) {
-        return NextResponse.json({ error: e.message }, { status: 500 });
+    } catch (e: unknown) {
+        return NextResponse.json({ error: e instanceof Error ? e.message : 'Unknown error' }, { status: 500 });
     }
 }
 
@@ -59,8 +59,8 @@ export async function POST(request: NextRequest) {
         }
 
         return NextResponse.json(data);
-    } catch (e: any) {
-        return NextResponse.json({ error: e.message }, { status: 500 });
+    } catch (e: unknown) {
+        return NextResponse.json({ error: e instanceof Error ? e.message : 'Unknown error' }, { status: 500 });
     }
 }
 
@@ -104,7 +104,7 @@ export async function DELETE(request: NextRequest) {
         }
 
         return NextResponse.json({ success: true });
-    } catch (e: any) {
-        return NextResponse.json({ error: e.message }, { status: 500 });
+    } catch (e: unknown) {
+        return NextResponse.json({ error: e instanceof Error ? e.message : 'Unknown error' }, { status: 500 });
     }
 }

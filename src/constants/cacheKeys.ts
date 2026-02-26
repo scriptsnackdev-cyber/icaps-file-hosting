@@ -1,11 +1,12 @@
 export const CACHE_KEYS = {
-    PROJECTS: 'global_projects',
-    STORAGE_STATS: 'storage_stats',
-    AUTH_ADMIN: 'auth_is_admin',
+    AUTH_USER: 'auth_user',
+    AUTH_ADMIN: 'auth_admin_status',
     AUTH_EMAIL: 'auth_user_email',
     AUTH_ID: 'auth_user_id',
-
-    // Dynamic keys
-    PROJECT_DETAILS: (id: string) => `cache_project_${id}`,
-    NODES: (projectId: string, pathKey: string) => `cache_nodes_${projectId}_${pathKey}`,
+    PROJECTS: 'global_projects',
+    STORAGE_STATS: 'storage_stats',
+    // Dynamic keys generator
+    NODES: (projectId: string, path: string) => `nodes_${projectId}_${path}`,
+    PROJECT_DETAILS: (projectId: string) => `project_${projectId}`,
+    RECENT_FILES: 'recent_files'
 };

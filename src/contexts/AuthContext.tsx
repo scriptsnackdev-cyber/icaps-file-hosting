@@ -90,13 +90,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }, [checkAuth]);
 
     const signOut = async () => {
-        const supabase = createClient();
-        await supabase.auth.signOut();
-        setIsAdmin(false);
-        setUserEmail(null);
-        localStorage.removeItem(CACHE_KEYS.AUTH_ADMIN);
-        localStorage.removeItem(CACHE_KEYS.AUTH_EMAIL);
-        window.location.href = '/login';
+        try {
+            console.log("Signing out...");
+            setLoading(true);
+            const supabase = createClient();
+
+            // Force timeout 2s
+            await Promise.race([
+                supabase.auth.signOut(),
+                new Promise(resolve => setTimeout(resolve, 2000))
+            ]);
+
+            console.log("Sign out completed (or timed out)");
+        } catch (error) {
+            console.error("Error signing out:", error);
+        } finally {
+            console.log("Clearing state and redirecting...");
+            setIsAdmin(false);
+            setUserEmail(null);
+            setUserId(null);
+            localStorage.clear(); // Clear all app state
+
+            // Force hard redirect
+            window.location.href = '/login';
+        }
     };
 
     return (

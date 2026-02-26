@@ -21,6 +21,7 @@ export default function WhitelistPage() {
     // New User Form
     const [newEmail, setNewEmail] = useState('');
     const [newRole, setNewRole] = useState<'user' | 'admin'>('user');
+    const [isSubmitting, setIsSubmitting] = useState(false);
 
     const { showToast } = useToast();
     const router = useRouter();
@@ -57,12 +58,14 @@ export default function WhitelistPage() {
         };
         fetchUser();
         fetchWhitelist();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const handleAddUser = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!newEmail.trim()) return;
+        if (!newEmail.trim() || isSubmitting) return;
 
+        setIsSubmitting(true);
         try {
             const res = await fetch('/api/admin/whitelist', {
                 method: 'POST',
@@ -79,8 +82,10 @@ export default function WhitelistPage() {
                 const err = await res.json();
                 showToast(err.error || "Failed to add user", "error");
             }
-        } catch (e) {
+        } catch {
             showToast("Error adding user", "error");
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
@@ -91,6 +96,10 @@ export default function WhitelistPage() {
         }
         if (!confirm(`Are you sure you want to remove ${email} from the whitelist?`)) return;
 
+        // Optimistic Update
+        const previousWhitelist = [...whitelist];
+        setWhitelist(prev => prev.filter(u => u.email !== email));
+
         try {
             const res = await fetch(`/api/admin/whitelist?email=${encodeURIComponent(email)}`, {
                 method: 'DELETE'
@@ -98,13 +107,14 @@ export default function WhitelistPage() {
 
             if (res.ok) {
                 showToast("User removed", "success");
-                setWhitelist(prev => prev.filter(u => u.email !== email));
             } else {
                 const err = await res.json();
-                showToast(err.error || "Failed to remove user", "error");
+                throw new Error(err.error || "Failed to remove user");
             }
-        } catch (e) {
-            showToast("Error removing user", "error");
+        } catch (e: any) {
+            // Revert on error
+            setWhitelist(previousWhitelist);
+            showToast(e.message || "Error removing user", "error");
         }
     };
 
@@ -300,9 +310,11 @@ export default function WhitelistPage() {
                                         </button>
                                         <button
                                             type="submit"
-                                            className="flex-1 py-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl font-bold shadow-lg shadow-blue-200 transition-all transform active:scale-95"
+                                            disabled={isSubmitting}
+                                            className="flex-1 py-3.5 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-2xl font-bold shadow-lg shadow-blue-200 transition-all transform active:scale-95 flex items-center justify-center gap-2"
                                         >
-                                            Add User
+                                            {isSubmitting && <Loader2 className="w-5 h-5 animate-spin" />}
+                                            {isSubmitting ? 'Adding...' : 'Add User'}
                                         </button>
                                     </div>
                                 </form>

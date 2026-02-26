@@ -49,8 +49,8 @@ export async function POST(request: NextRequest) {
         const signedUrl = await getSignedUrl(r2, command, { expiresIn: 3600 });
 
         return NextResponse.json({ url: signedUrl, key });
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error('Error generating presigned URL:', error);
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ error: error instanceof Error ? error.message : 'Unknown error' }, { status: 500 });
     }
 }

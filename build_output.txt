@@ -1,0 +1,53 @@
+
+> icaps-file-hosting@0.1.0 build
+> next build
+
+▲ Next.js 16.1.5 (Turbopack)
+- Environments: .env.local
+
+⚠ The "middleware" file convention is deprecated. Please use "proxy" instead. Learn more: https://nextjs.org/docs/messages/middleware-to-proxy
+  Creating an optimized production build ...
+✓ Compiled successfully in 6.3s
+  Running TypeScript ...
+  Collecting page data using 11 workers ...
+  Generating static pages using 11 workers (0/25) ...
+  Generating static pages using 11 workers (6/25) 
+  Generating static pages using 11 workers (12/25) 
+  Generating static pages using 11 workers (18/25) 
+✓ Generating static pages using 11 workers (25/25) in 535.1ms
+  Finalizing page optimization ...
+
+Route (app)
+┌ ƒ /
+├ ○ /_not-found
+├ ○ /admin/whitelist
+├ ƒ /api/admin/whitelist
+├ ƒ /api/drive
+├ ƒ /api/drive/folders/batch
+├ ƒ /api/drive/public-node
+├ ƒ /api/drive/search
+├ ƒ /api/drive/upload
+├ ƒ /api/drive/upload/complete
+├ ƒ /api/drive/upload/init
+├ ƒ /api/drive/versions
+├ ƒ /api/drive/zip
+├ ƒ /api/files
+├ ƒ /api/files/[key]
+├ ƒ /api/files/log-upload
+├ ƒ /api/files/upload
+├ ƒ /api/projects
+├ ƒ /api/projects/notify
+├ ƒ /api/projects/settings
+├ ƒ /api/stats
+├ ƒ /auth/callback
+├ ƒ /drive/[[...slug]]
+├ ○ /login
+├ ƒ /share/[id]
+└ ○ /trash
+
+
+ƒ Proxy (Middleware)
+
+○  (Static)   prerendered as static content
+ƒ  (Dynamic)  server-rendered on demand
+

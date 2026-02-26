@@ -1,8 +1,9 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { useParams, useSearchParams, useRouter } from 'next/navigation';
-import { Loader2, FileText, Download, Folder, AlertCircle, Cloud, FileArchive, Lock, ArrowRight, Eye, EyeOff } from 'lucide-react';
+import { useParams, useRouter } from 'next/navigation';
+import { Loader2, FileText, Download, Folder, AlertCircle, FileArchive, Lock, ArrowRight, Eye, EyeOff } from 'lucide-react';
+import Image from 'next/image';
 import { StorageNode } from '@/types';
 
 export default function SharePage() {
@@ -67,13 +68,8 @@ export default function SharePage() {
             if (pwd) setVerifiedPassword(pwd);
             setIsPasswordRequired(false);
 
-        } catch (e: any) {
-            console.error(e);
-            if (pwd !== undefined && e.message === 'Incorrect password') {
-                setError('Incorrect password. Please try again.');
-            } else {
-                setError(e.message || 'File not found or access denied.');
-            }
+        } catch (error: unknown) {
+            setError(error instanceof Error ? error.message : 'Invalid password');
         } finally {
             setLoading(false);
         }
@@ -81,6 +77,7 @@ export default function SharePage() {
 
     useEffect(() => {
         fetchNode();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [id]);
 
     const handlePasswordSubmit = (e: React.FormEvent) => {
@@ -96,7 +93,7 @@ export default function SharePage() {
             let url = `/api/drive/zip?folderId=${node.id}`;
             if (verifiedPassword) url += `&pwd=${encodeURIComponent(verifiedPassword)}`;
             window.location.href = url;
-        } catch (e) {
+        } catch {
             alert('Failed to start download');
         } finally {
             setTimeout(() => setDownloadingZip(false), 2000);
@@ -217,7 +214,7 @@ export default function SharePage() {
         <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
             <div className="mb-8 text-center flex flex-col items-center">
                 <div className="w-32 h-32 bg-white rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-sm border border-slate-100 p-2">
-                    <img src="/ICAPS.png" alt="ICAPS Logo" className="w-full h-full object-contain" />
+                    <Image src="/ICAPS.png" alt="ICAPS Logo" width={128} height={128} className="w-full h-full object-contain" />
                 </div>
                 <h1 className="text-3xl font-bold text-slate-800 tracking-tight">Shared Item</h1>
                 <p className="text-slate-500 font-medium">You have been given access to this content</p>

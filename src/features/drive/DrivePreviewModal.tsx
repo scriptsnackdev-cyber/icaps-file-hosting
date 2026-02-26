@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { X, Pencil, Download, Loader2, FileText } from 'lucide-react';
+import Image from 'next/image';
 import { StorageNode } from '@/types';
 
 interface DrivePreviewModalProps {
@@ -72,8 +73,7 @@ export const DrivePreviewModal: React.FC<DrivePreviewModalProps> = ({
 
                         if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) {
                             return (
-                                /* eslint-disable-next-line @next/next/no-img-element */
-                                <img src={url} alt={previewNode.name} className="max-w-full max-h-full object-contain" />
+                                <Image src={url} alt={previewNode.name} fill className="object-contain" unoptimized />
                             );
                         } else if (['mp4', 'webm', 'mov'].includes(ext)) {
                             return (

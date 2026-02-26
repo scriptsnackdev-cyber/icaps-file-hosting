@@ -3,10 +3,11 @@
 import { useState, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/utils/supabase/client';
-import { Mail, Loader2, ShieldCheck, Cloud, AlertCircle, ArrowLeft, CheckCircle2 } from 'lucide-react';
-import { ensureUserExists } from './actions';
+import Image from 'next/image';
+import { Mail, Loader2, ShieldCheck, AlertCircle, ArrowLeft } from 'lucide-react';
+import { checkWhitelistAndCreateUser, verifyOtpAction } from './actions';
 
-import { useAuth } from '@/contexts/AuthContext';
+
 
 export default function LoginPage() {
     return (
@@ -26,11 +27,9 @@ function LoginForm() {
     const [step, setStep] = useState<'email' | 'otp'>('email');
     const [isLoading, setIsLoading] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-    const router = useRouter();
+
     const searchParams = useSearchParams();
     const next = searchParams.get('next') || '/';
-    const { refreshAuth } = useAuth(); // NEW
-
     const supabase = createClient();
 
     const handleSendOtp = async (e: React.FormEvent) => {
@@ -48,25 +47,16 @@ function LoginForm() {
         try {
             await new Promise(resolve => setTimeout(resolve, 800)); // Minimum loading time for UX feel
 
-            // 2. Check Whitelist
-            const { data: whitelistData, error: whitelistError } = await supabase
-                .from('whitelist')
-                .select('email')
-                .eq('email', email)
-                .single();
+            // 2. Server-Side Whitelist Check & User Creation (Bypasses RLS)
+            const result = await checkWhitelistAndCreateUser(email);
 
-            if (whitelistError || !whitelistData) {
-                // Artificial delay to prevent enumeration timing attacks
-                await new Promise(resolve => setTimeout(resolve, 500));
-                throw new Error('Access Denied: Your email is not whitelisted.');
+            if (!result.success) {
+                // If denied or error
+                await new Promise(resolve => setTimeout(resolve, 500)); // Delay for security
+                throw new Error(result.error || 'Access Denied');
             }
 
-            // 3. Ensure user exists and is confirmed (skips "Confirm Email" link for new users)
-            await ensureUserExists(email);
-
-            // 4. Send OTP
-            // removing emailRedirectTo to encourage code-based flow if template is set up for it, 
-            // or standard OTP behavior.
+            // 3. Send OTP
             const { error } = await supabase.auth.signInWithOtp({
                 email,
                 // We default to not sending a redirect URL so Supabase sends a code if configured
@@ -78,16 +68,13 @@ function LoginForm() {
 
             setStep('otp');
             setMessage({ type: 'success', text: 'OTP sent! Please check your email.' });
-        } catch (error: any) {
-            if (error.code === 'PGRST116') { // Row not found
-                setMessage({ type: 'error', text: 'Access Denied: Your email is not whitelisted.' });
-            } else {
-                let errorMessage = error.message || 'Failed to send login link';
-                if (errorMessage.includes('rate limit exceeded') || error.status === 429) {
-                    errorMessage = 'Too many attempts. Please wait 60 seconds.';
-                }
-                setMessage({ type: 'error', text: errorMessage });
+        } catch (error: unknown) {
+            let errorMessage = error instanceof Error ? error.message : 'Failed to send login link';
+            // Handle specific errors
+            if (errorMessage.includes('rate limit exceeded') || (error as any)?.status === 429) {
+                errorMessage = 'Too many attempts. Please wait 60 seconds.';
             }
+            setMessage({ type: 'error', text: errorMessage });
         } finally {
             setIsLoading(false);
         }
@@ -98,23 +85,34 @@ function LoginForm() {
         setIsLoading(true);
         setMessage(null);
 
+        // Sanitize OTP just in case
+        const token = otpCode.replace(/\D/g, '');
+        if (token.length < 6) {
+            setMessage({ type: 'error', text: 'Please enter a 6-digit code.' });
+            setIsLoading(false);
+            return;
+        }
+
         try {
-            const { error } = await supabase.auth.verifyOtp({
-                email,
-                token: otpCode,
-                type: 'email',
-            });
+            console.log('Verifying OTP (Server-side)...', token);
 
-            if (error) throw error;
+            // Call Server Action
+            const result = await verifyOtpAction(email, token);
 
-            // Wait for auth context to update (specifically isAdmin check)
-            await refreshAuth();
+            if (!result.success) {
+                console.error('verifyOtpAction failed:', result.error);
+                throw new Error(result.error);
+            }
 
-            router.push(next);
-            router.refresh();
+            console.log('Verification successful (Server-side)');
 
-        } catch (error: any) {
-            setMessage({ type: 'error', text: error.message || 'Invalid OTP code' });
+            // Force hard redirect
+            console.log('Redirecting to:', next);
+            window.location.href = next;
+
+        } catch (error: unknown) {
+            console.error('handleVerifyOtp Error:', error);
+            setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Invalid OTP code' });
             setIsLoading(false);
         }
     };
@@ -133,7 +131,7 @@ function LoginForm() {
                             </div>
                         ) : (
                             <div className="flex justify-center mb-6">
-                                <img src="/ICAPS.png" alt="Logo" className="w-32 h-auto object-contain" />
+                                <Image src="/ICAPS.png" alt="Logo" width={128} height={128} className="w-32 h-auto object-contain" />
                             </div>
                         )}
                         <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
@@ -142,7 +140,7 @@ function LoginForm() {
                         <p className="text-slate-500 mt-2">
                             {step === 'email'
                                 ? 'Sign in to manage your files securely'
-                                : <span className="block px-4">We've sent a verification code to <span className="font-semibold text-slate-700 block mt-1">{email}</span></span>
+                                : <span className="block px-4">We&apos;ve sent a verification code to <span className="font-semibold text-slate-700 block mt-1">{email}</span></span>
                             }
                         </p>
                     </div>

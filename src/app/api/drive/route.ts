@@ -47,7 +47,7 @@ export async function GET(request: NextRequest) {
             }
         }
         let currentFolderId: string | null = null;
-        let chain: { id: string, name: string }[] = [];
+        const chain: { id: string, name: string }[] = [];
 
         // Resolve Path to ID if 'path' is provided and not empty
         if (path && path !== '/') {
@@ -87,7 +87,7 @@ export async function GET(request: NextRequest) {
         }
 
         // Fetch Children of Resolved ID within Project
-        let nodes: any[] = [];
+        let nodes: Record<string, unknown>[] = [];
         let totalCount = 0;
 
         if (isTrashView) {
@@ -119,7 +119,7 @@ export async function GET(request: NextRequest) {
                     totalCount = rpcData.length > 0 ? (rpcData[0].full_count || rpcData.length) : 0;
                     rpcSuccess = true;
                 }
-            } catch (e) {
+            } catch {
                 // Fallback silently
             }
 
@@ -143,17 +143,17 @@ export async function GET(request: NextRequest) {
 
                 if (childrenError) throw childrenError;
 
-                const latestNodesMap = new Map<string, any>();
-                (rawNodes || []).forEach((node: any) => {
-                    const existing = latestNodesMap.get(node.name);
-                    if (!existing || (node.version || 1) > (existing.version || 1)) {
-                        latestNodesMap.set(node.name, node);
+                const latestNodesMap = new Map<string, Record<string, unknown>>();
+                (rawNodes || []).forEach((node: Record<string, unknown>) => {
+                    const existing = latestNodesMap.get(node.name as string);
+                    if (!existing || ((node.version as number) || 1) > ((existing.version as number) || 1)) {
+                        latestNodesMap.set(node.name as string, node);
                     }
                 });
 
                 const allFilteredNodes = Array.from(latestNodesMap.values()).sort((a, b) => {
                     if (a.type !== b.type) return b.type === 'FOLDER' ? -1 : 1;
-                    return a.name.localeCompare(b.name);
+                    return (a.name as string).localeCompare(b.name as string);
                 });
 
                 totalCount = allFilteredNodes.length;
@@ -177,9 +177,9 @@ export async function GET(request: NextRequest) {
             hasMore: offset + nodes.length < totalCount
         });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("GET Drive Error:", error);
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ error: error instanceof Error ? error.message : 'Unknown error' }, { status: 500 });
     }
 }
 
@@ -242,7 +242,7 @@ export async function POST(request: NextRequest) {
             query = query.is('parent_id', null);
         }
 
-        const { data: existing, error: findError } = await query.single();
+        const { data: existing } = await query.single();
 
         if (existing) {
             return NextResponse.json(existing);
@@ -283,8 +283,8 @@ export async function POST(request: NextRequest) {
 
         return NextResponse.json(data);
 
-    } catch (error: any) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+    } catch (error: unknown) {
+        return NextResponse.json({ error: error instanceof Error ? error.message : 'Unknown error' }, { status: 500 });
     }
 }
 
@@ -305,79 +305,7 @@ export async function DELETE(request: NextRequest) {
         return NextResponse.json({ error: 'ID is required' }, { status: 400 });
     }
 
-    let resolvedProjectId = projectId;
-    if (projectId) {
-        const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId);
-        if (!isUUID) {
-            const { data: projs } = await supabase
-                .from('projects')
-                .select('id')
-                .eq('name', decodeURIComponent(projectId))
-                .limit(1);
-            if (projs && projs.length > 0) {
-                resolvedProjectId = projs[0].id;
-            }
-        }
-    }
 
-    let totalDeletedSize = 0;
-
-    // Helper to delete a single node and its physical file if applicable
-    const deleteNodeRecursively = async (nodeId: string) => {
-        // 1. Fetch children
-        const { data: children, error } = await supabase
-            .from('storage_nodes')
-            .select('*')
-            .eq('parent_id', nodeId);
-
-        if (error) throw error;
-
-        // Keep track of names already processed in this folder to avoid redundant version deletions
-        const processedFileNames = new Set<string>();
-
-        // 2. Process children
-        if (children && children.length > 0) {
-            for (const child of children) {
-                if (child.type === 'FOLDER') {
-                    await deleteNodeRecursively(child.id);
-                } else {
-                    // It's a file - ensure we delete ALL versions of this file in this folder
-                    if (!processedFileNames.has(child.name)) {
-                        processedFileNames.add(child.name);
-
-                        // Fetch all versions of this specific file in this specific parent
-                        const { data: allVersions } = await supabase
-                            .from('storage_nodes')
-                            .select('*')
-                            .eq('project_id', child.project_id)
-                            .eq('name', child.name)
-                            .eq('type', 'FILE')
-                            .eq('parent_id', nodeId); // All versions MUST share the same parent in our logic
-
-                        if (allVersions) {
-                            for (const v of allVersions) {
-                                totalDeletedSize += (v.size || 0);
-                                if (v.r2_key) {
-                                    try {
-                                        await r2.send(new DeleteObjectCommand({
-                                            Bucket: R2_BUCKET_NAME,
-                                            Key: v.r2_key,
-                                        }));
-                                    } catch (e) {
-                                        console.error(`Failed to delete R2 object ${v.r2_key}`, e);
-                                    }
-                                }
-                                await supabase.from('storage_nodes').delete().eq('id', v.id);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Delete the folder itself
-        await supabase.from('storage_nodes').delete().eq('id', nodeId);
-    };
 
 
     try {
@@ -412,7 +340,7 @@ export async function DELETE(request: NextRequest) {
             return NextResponse.json({ error: 'This project is in Read-Only mode.' }, { status: 403 });
         }
 
-        const targetProjectId = targetNode.project_id;
+
 
         if (targetNode.type === 'FILE') {
             const isOwner = targetNode.created_by === user.id || targetNode.owner_email === user.email;
@@ -467,9 +395,9 @@ export async function DELETE(request: NextRequest) {
             return NextResponse.json({ success: true, message: 'Moved to trash' });
         }
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Delete Error:", error);
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ error: error instanceof Error ? error.message : 'Unknown error' }, { status: 500 });
     }
 }
 
@@ -545,7 +473,7 @@ export async function PATCH(request: NextRequest) {
         }
 
         // 4. Update Node
-        const updates: any = {};
+        const updates: Record<string, unknown> = {};
         if (status) {
             updates.status = status;
             if (status === 'ACTIVE') {
@@ -578,10 +506,10 @@ export async function PATCH(request: NextRequest) {
                     }));
 
                     updates.r2_key = newKey;
-                } catch (e: any) {
+                } catch (e: unknown) {
                     console.error("R2 Rename Error:", e);
                     // If R2 fails, we probably shouldn't rename in DB to keep consistency
-                    return NextResponse.json({ error: 'Failed to update Cloud storage: ' + e.message }, { status: 500 });
+                    return NextResponse.json({ error: 'Failed to update Cloud storage: ' + (e instanceof Error ? e.message : 'Unknown error') }, { status: 500 });
                 }
             }
         }
@@ -599,8 +527,8 @@ export async function PATCH(request: NextRequest) {
 
         return NextResponse.json(updatedNode);
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Update Error:", error);
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ error: error instanceof Error ? error.message : 'Unknown error' }, { status: 500 });
     }
 }

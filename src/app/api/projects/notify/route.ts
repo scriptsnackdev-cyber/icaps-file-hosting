@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/utils/supabase/server';
 import { sendActivityNotification } from '@/lib/resend';
+import { supabaseAdmin } from '@/lib/supabase-admin';
 
 export async function POST(request: NextRequest) {
     const supabase = await createClient();
@@ -26,19 +27,7 @@ export async function POST(request: NextRequest) {
         // Permission: Project members or admins
         // In this context, we just check if notify_on_activity is on and user is not owner
         if (project.created_by !== user.id && project.settings?.notify_on_activity) {
-            // Fetch owner email using Admin Client (Service Role)
-            // We need this because we can't query other users' emails directly from client SDK usually
-            const { createClient: createAdminClient } = require('@supabase/supabase-js');
-            const supabaseAdmin = createAdminClient(
-                process.env.NEXT_PUBLIC_SUPABASE_URL!,
-                process.env.SUPABASE_SERVICE_ROLE_KEY!,
-                {
-                    auth: {
-                        autoRefreshToken: false,
-                        persistSession: false
-                    }
-                }
-            );
+
 
             const { data: { user: ownerUser }, error: ownerError } = await supabaseAdmin.auth.admin.getUserById(project.created_by);
 
@@ -47,7 +36,7 @@ export async function POST(request: NextRequest) {
                     to: ownerUser.email,
                     projectName: project.name,
                     userName: user.email || 'Unknown User',
-                    action: action as any,
+                    action: action as 'UPLOADED' | 'DELETED' | 'VERSION_UPDATED',
                     fileName: fileName,
                     timestamp: new Date().toLocaleString()
                 });
@@ -57,7 +46,7 @@ export async function POST(request: NextRequest) {
         }
 
         return NextResponse.json({ success: true });
-    } catch (error: any) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+    } catch (error: unknown) {
+        return NextResponse.json({ error: error instanceof Error ? error.message : 'Unknown error' }, { status: 500 });
     }
 }

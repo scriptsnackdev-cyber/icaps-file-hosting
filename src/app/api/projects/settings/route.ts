@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/utils/supabase/server';
+import { supabaseAdmin } from '@/lib/supabase-admin';
 
 export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
@@ -28,19 +29,22 @@ export async function GET(request: NextRequest) {
 
         if (!isAdmin && !isOwner) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
-        // Fetch members
-        const { data: membersData } = await supabase
+        // Fetch members using ADMIN client to bypass RLS issues
+        const { data: membersData } = await supabaseAdmin
             .from('project_members')
             .select('user_email')
             .eq('project_id', projectId);
 
-        const textSettings = project.settings || { notify_on_activity: false };
+        const textSettings = typeof project.settings === 'string'
+            ? JSON.parse(project.settings)
+            : (project.settings || { notify_on_activity: false });
+
         return NextResponse.json({
             ...textSettings,
             members: membersData?.map(m => m.user_email) || []
         });
-    } catch (error: any) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+    } catch (error: unknown) {
+        return NextResponse.json({ error: error instanceof Error ? error.message : 'Unknown error' }, { status: 500 });
     }
 }
 
@@ -85,8 +89,8 @@ export async function PATCH(request: NextRequest) {
 
         // 4. Update Members if provided
         if (members && Array.isArray(members)) {
-            // Get current members
-            const { data: currentMembers } = await supabase.from('project_members').select('user_email').eq('project_id', projectId);
+            // Get current members (using Admin to be sure)
+            const { data: currentMembers } = await supabaseAdmin.from('project_members').select('user_email').eq('project_id', projectId);
             const currentEmails = new Set<string>(currentMembers?.map(m => m.user_email) || []);
             const newEmails = new Set<string>(members);
 
@@ -94,16 +98,16 @@ export async function PATCH(request: NextRequest) {
             const toRemove = [...currentEmails].filter(e => !newEmails.has(e));
 
             if (toAdd.length > 0) {
-                await supabase.from('project_members').insert(toAdd.map(email => ({ project_id: projectId, user_email: email })));
+                await supabaseAdmin.from('project_members').insert(toAdd.map(email => ({ project_id: projectId, user_email: email })));
             }
 
             if (toRemove.length > 0) {
-                await supabase.from('project_members').delete().eq('project_id', projectId).in('user_email', toRemove);
+                await supabaseAdmin.from('project_members').delete().eq('project_id', projectId).in('user_email', toRemove);
             }
         }
 
         return NextResponse.json({ success: true, settings: updatedSettings, members });
-    } catch (error: any) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+    } catch (error: unknown) {
+        return NextResponse.json({ error: error instanceof Error ? error.message : 'Unknown error' }, { status: 500 });
     }
 }

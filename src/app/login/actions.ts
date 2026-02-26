@@ -1,6 +1,33 @@
 'use server';
 
+import { createClient } from '@/utils/supabase/server';
 import { supabaseAdmin } from '@/lib/supabase-admin';
+
+export async function verifyOtpAction(email: string, token: string) {
+    const supabase = await createClient();
+
+    try {
+        const { data: { session }, error } = await supabase.auth.verifyOtp({
+            email,
+            token,
+            type: 'email',
+        });
+
+        if (error) {
+            console.error('verifyOtpAction Error:', error);
+            return { success: false, error: error.message };
+        }
+
+        if (!session) {
+            return { success: false, error: 'Failed to create session' };
+        }
+
+        return { success: true };
+    } catch (error: any) {
+        console.error('Unexpected error in verifyOtpAction:', error);
+        return { success: false, error: error.message };
+    }
+}
 
 export async function ensureUserExists(email: string) {
     if (!email) return { error: 'Email is required' };
@@ -46,5 +73,39 @@ export async function ensureUserExists(email: string) {
     } catch (e: any) {
         console.error('Unexpected error in ensureUserExists:', e);
         return { success: false, error: e.message };
+    }
+}
+
+export async function checkWhitelistAndCreateUser(email: string) {
+    if (!email) return { success: false, error: 'Email is required' };
+
+    try {
+        // 1. Check Whitelist (Server-side bypass RLS)
+        const { data: whitelistData, error: whitelistError } = await supabaseAdmin
+            .from('whitelist')
+            .select('email, role') // Select role too just in case
+            .eq('email', email)
+            .single();
+
+        if (whitelistError || !whitelistData) {
+            // Not whitelisted or error
+            console.warn(`Login attempt denied for non-whitelisted email: ${email}`);
+            return {
+                success: false,
+                error: 'Access Denied: Your email is not whitelisted.'
+            };
+        }
+
+        // 2. Ensure user exists in Auth
+        const ensureResult = await ensureUserExists(email);
+        if (ensureResult.error) {
+            return { success: false, error: ensureResult.error };
+        }
+
+        return { success: true };
+
+    } catch (error: any) {
+        console.error('Error in checkWhitelistAndCreateUser:', error);
+        return { success: false, error: error.message || 'Server error checking whitelist' };
     }
 }

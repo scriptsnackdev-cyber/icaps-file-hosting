@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
 
         const userEmail = user?.email?.toLowerCase() || '';
         let isMember = false;
-        let projectUUID = node.project_id;
+        const projectUUID = node.project_id;
         let folderPathString = '';
 
         if (user) {
@@ -117,8 +117,8 @@ export async function POST(request: NextRequest) {
 
         return NextResponse.json({ error: 'Access Denied' }, { status: 403 });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Public Node Fetch Error:", error);
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ error: error instanceof Error ? error.message : 'Unknown error' }, { status: 500 });
     }
 }

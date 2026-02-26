@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
-import { Home, FolderOpen, Clock, Star, Trash2, Cloud, Settings, LogOut, FolderPlus } from 'lucide-react';
+import React, { useState } from 'react';
+import { FolderOpen, Trash2, Cloud, Settings, LogOut, FolderPlus } from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
+import Image from 'next/image';
 
 import { useStorage } from '@/contexts/StorageContext';
 import { useAuth } from '@/contexts/AuthContext';
@@ -36,7 +37,7 @@ export function Sidebar() {
             {/* App Logo */}
             <div className="h-24 flex items-center justify-center border-b border-slate-100">
                 <div className="flex items-center text-blue-600">
-                    <img src="/ICAPS.png" alt="ICAPS Logo" className="w-32 h-auto object-contain" />
+                    <Image src="/ICAPS.png" alt="ICAPS Logo" width={128} height={128} className="w-32 h-auto object-contain" />
                 </div>
             </div>
 
@@ -127,6 +128,7 @@ export function Sidebar() {
                     </div>
                 )}
                 <button
+                    type="button"
                     onClick={() => setIsSignOutModalOpen(true)}
                     className="flex items-center gap-3 px-3 py-2.5 w-full text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                 >
@@ -157,14 +159,17 @@ export function Sidebar() {
                         </p>
                         <div className="flex gap-3">
                             <button
+                                type="button"
                                 onClick={() => setIsSignOutModalOpen(false)}
                                 className="flex-1 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl font-medium transition-colors"
                             >
                                 Cancel
                             </button>
                             <button
-                                onClick={() => {
-                                    signOut();
+                                type="button"
+                                onClick={async () => {
+                                    console.log("Sign Out clicked");
+                                    await signOut();
                                     setIsSignOutModalOpen(false);
                                 }}
                                 className="flex-1 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl font-semibold shadow-lg shadow-red-200 transition-all"

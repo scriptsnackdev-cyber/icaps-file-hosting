@@ -302,6 +302,8 @@ export const DriveNodesList: React.FC<DriveNodesListProps> = ({
                                 e.preventDefault();
                                 e.stopPropagation();
                                 setDragOverNodeId(null);
+
+                                // Internal Move Logic
                                 if (draggedNode && node.type === 'FOLDER' && node.id !== draggedNode.id) {
                                     if (selectedNodeIds.has(draggedNode.id)) {
                                         const itemsToMove = nodes.filter(n => selectedNodeIds.has(n.id));
@@ -316,6 +318,20 @@ export const DriveNodesList: React.FC<DriveNodesListProps> = ({
                                     }
                                     setDraggedNode(null);
                                     setSelectedNodeIds(new Set());
+                                    return;
+                                }
+
+                                // External Upload Logic (Dropping onto folder)
+                                if (node.type === 'FOLDER' && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                                    // Handle drop onto specific folder
+                                    // Since this component doesn't have startFolderUpload locally, 
+                                    // we can trigger the main handleDrop logic but with a specific target ID
+                                    // Usually it's better to bubble this up.
+                                    // For now, let's trigger a custom event or call a prop if we add it.
+                                    // Let's assume the user can implement handleFolderDrop in page.tsx
+                                    (window as any).dispatchEvent(new CustomEvent('folder-drop-upload', {
+                                        detail: { files: e.dataTransfer, targetFolderId: node.id }
+                                    }));
                                 }
                             }}
                             onMouseEnter={() => {

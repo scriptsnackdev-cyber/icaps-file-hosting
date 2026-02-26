@@ -136,13 +136,14 @@ export async function POST(request: NextRequest) {
         let folderPath = "";
         const pathNodes = folderPathRes.data;
         if (pathNodes && Array.isArray(pathNodes) && pathNodes.length > 0) {
-            folderPath = [...pathNodes].reverse().map((n: any) => n.name).join('/') + '/';
+            folderPath = [...pathNodes].reverse().map((n: any) => (n.name || "").replace(/[^a-zA-Z0-9.\-_]/gi, '_')).join('/') + '/';
         }
 
         // 1. Generate R2 Key
         const safeProjectName = project.name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+        const safeFilename = filename.replace(/[^a-zA-Z0-9.\-_]/gi, '_');
         const uniquePrefix = uuidv4().split('-')[0];
-        const uniqueKey = `projects/${safeProjectName}/${folderPath}${uniquePrefix}_v${targetVersion}_${filename}`;
+        const uniqueKey = `projects/${safeProjectName}/${folderPath}${uniquePrefix}_v${targetVersion}_${safeFilename}`;
 
         // 2. Generate Presigned URL
         const command = new PutObjectCommand({

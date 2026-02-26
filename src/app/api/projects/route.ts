@@ -3,7 +3,7 @@ import { createClient } from '@/utils/supabase/server';
 import { DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET_NAME } from '@/lib/r2';
 
-export async function GET(request: NextRequest) {
+export async function GET() {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
 
@@ -39,8 +39,8 @@ export async function GET(request: NextRequest) {
         if (error) throw error;
 
         return NextResponse.json(projects);
-    } catch (e: any) {
-        return NextResponse.json({ error: e.message }, { status: 500 });
+    } catch (e: unknown) {
+        return NextResponse.json({ error: e instanceof Error ? e.message : 'Unknown error' }, { status: 500 });
     }
 }
 
@@ -97,8 +97,8 @@ export async function POST(request: NextRequest) {
 
         return NextResponse.json(project);
 
-    } catch (e: any) {
-        return NextResponse.json({ error: e.message }, { status: 500 });
+    } catch (e: unknown) {
+        return NextResponse.json({ error: e instanceof Error ? e.message : 'Unknown error' }, { status: 500 });
     }
 }
 
@@ -156,8 +156,8 @@ export async function DELETE(request: NextRequest) {
 
         return NextResponse.json({ success: true });
 
-    } catch (e: any) {
-        return NextResponse.json({ error: e.message }, { status: 500 });
+    } catch (e: unknown) {
+        return NextResponse.json({ error: e instanceof Error ? e.message : 'Unknown error' }, { status: 500 });
     }
 }
 
@@ -174,18 +174,28 @@ export async function PATCH(request: NextRequest) {
         .eq('email', user.email)
         .single();
 
-    if (whitelistUser?.role !== 'admin') {
-        return NextResponse.json({ error: 'Forbidden: Admins only' }, { status: 403 });
-    }
-
     try {
         const body = await request.json();
         const { id, notify_on_activity, version_retention_limit, read_only, members } = body;
 
         if (!id) return NextResponse.json({ error: 'Project ID required' }, { status: 400 });
 
+        // Check ownership
+        const { data: project } = await supabase
+            .from('projects')
+            .select('created_by')
+            .eq('id', id)
+            .single();
+
+        const isOwner = project && project.created_by === user.id;
+        const isAdmin = whitelistUser?.role === 'admin';
+
+        if (!isAdmin && !isOwner) {
+            return NextResponse.json({ error: 'Forbidden: Admins or Project Owner only' }, { status: 403 });
+        }
+
         // 1. Update project settings
-        const updateData: any = {};
+        const updateData: Record<string, unknown> = {};
         if (typeof notify_on_activity !== 'undefined') updateData.notify_on_activity = notify_on_activity;
         if (typeof version_retention_limit !== 'undefined') updateData.version_retention_limit = version_retention_limit;
         if (typeof read_only !== 'undefined') updateData.read_only = read_only;
@@ -226,7 +236,7 @@ export async function PATCH(request: NextRequest) {
 
         return NextResponse.json({ success: true });
 
-    } catch (e: any) {
-        return NextResponse.json({ error: e.message }, { status: 500 });
+    } catch (e: unknown) {
+        return NextResponse.json({ error: e instanceof Error ? e.message : 'Unknown error' }, { status: 500 });
     }
 }

@@ -15,7 +15,7 @@ import { StorageNode, Project } from '@/types';
 import { createClient } from '@/utils/supabase/client';
 import { format } from 'date-fns';
 import { useParams, useRouter, usePathname } from 'next/navigation';
-import { TaskProgress, AsyncTask } from '@/features/drive/TaskProgress';
+import { TaskProgress, AsyncTask, TaskType } from '@/features/drive/TaskProgress';
 import { v4 as uuidv4 } from 'uuid';
 import { useToast } from '@/contexts/ToastContext';
 import { useStorage } from '@/contexts/StorageContext';
@@ -46,7 +46,7 @@ export default function DrivePage() {
     // Project structure: /drive/[projectId]/[...folders]
     const slugKey = slug?.join('/') || '';
     const urlProjectId = slug?.[0];
-    const folderPath = React.useMemo(() => (slug?.slice(1) || []).map(s => decodeURIComponent(s)), [slugKey]); // Use slugKey for stability
+    const folderPath = React.useMemo(() => (slug?.slice(1) || []).map(s => decodeURIComponent(s)), [slug, slugKey]); // Use slugKey for stability
     const folderPathKey = folderPath.join('/');
 
     const { projects, projectsLoading, refreshProjects } = useActionContext();
@@ -89,7 +89,7 @@ export default function DrivePage() {
         if (res.status === 404) throw new Error('NOT_FOUND');
         if (!res.ok) throw new Error('Failed to load');
         return await res.json();
-    }, [urlProjectId, folderPathKey]);
+    }, [urlProjectId, folderPathKey, folderPath]);
 
     const cachedFetcher = useCallback(() => fetchFolderData(0), [fetchFolderData]);
 
@@ -141,20 +141,23 @@ export default function DrivePage() {
         }
     }, [hasMore, isFetchingMore, urlProjectId, offset, fetchFolderData, showToast]);
 
+    const currentFolderId = folderData?.currentFolderId || null;
+    const folderChain = React.useMemo(() => folderData?.breadcrumbs || [], [folderData]);
+    const loading = folderLoading && !folderData;
+
     const nodes: StorageNode[] = React.useMemo(() => {
         const serverNodes = displayNodes;
         // Use a set of names+types for O(1) lookup during filtering
         const serverNodeKeys = new Set(serverNodes.map((s: any) => `${s.name}-${s.type}`));
 
         // Filter out optimistic nodes that have already appeared on server
+        // AND only show those belonging to the CURRENT folder
         const filteredOptimistic = optimisticNodes.filter(o =>
+            (o.parent_id === currentFolderId) &&
             !serverNodeKeys.has(`${o.name}-${o.type}`)
         );
         return [...filteredOptimistic, ...serverNodes];
-    }, [displayNodes, optimisticNodes]);
-    const currentFolderId = folderData?.currentFolderId || null;
-    const folderChain = React.useMemo(() => folderData?.breadcrumbs || [], [folderData]);
-    const loading = folderLoading && !folderData;
+    }, [displayNodes, optimisticNodes, currentFolderId]);
 
     // Sync Current Project state separately (as it persists across folder changes)
     useEffect(() => {
@@ -170,7 +173,7 @@ export default function DrivePage() {
             setCurrentProject(folderData.project);
             localStorage.setItem(CACHE_KEYS.PROJECT_DETAILS(urlProjectId || ''), JSON.stringify(folderData.project));
         }
-    }, [folderData, urlProjectId]);
+    }, [folderData, urlProjectId, currentProject]);
 
     // Shim for existing codebase calling "fetchNodes"
     const fetchNodes = useCallback(async (force = false, silent = false) => {
@@ -252,6 +255,11 @@ export default function DrivePage() {
     const [isRollingBack, setIsRollingBack] = useState(false);
     const [pendingRollback, setPendingRollback] = useState<StorageNode | null>(null);
 
+    // Global Batch Resolution Logic
+    const batchResolutionRef = useRef<'update' | 'overwrite' | 'skip' | null>(null);
+    const isConflictModalActiveRef = useRef(false);
+    const [isApplyToAll, setIsApplyToAll] = useState(false);
+
     // Project Settings State
     const [isProjectSettingsOpen, setIsProjectSettingsOpen] = useState(false);
     const [projectSettings, setProjectSettings] = useState<{ notify_on_activity: boolean, version_retention_limit?: number, read_only?: boolean }>({ notify_on_activity: false, version_retention_limit: 0, read_only: false });
@@ -268,24 +276,16 @@ export default function DrivePage() {
 
     const [isCreatePlannerModalOpen, setIsCreatePlannerModalOpen] = useState(false);
 
-    // Helper for Small File Proxy Upload (Workaround for CORS)
-    const uploadProxyFile = async (file: File) => {
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('filename', file.name);
-        formData.append('parentId', currentFolderId || 'null');
-        if (currentProject) formData.append('projectId', currentProject.id);
+    // Helper for Direct Upload (Wraps uploadFileToId)
+    const uploadDirectWrapper = async (file: File, parentId: string | null = null, resolution: 'update' | 'overwrite' = 'overwrite') => {
+        // Generate a temporary task for this background operation
+        // We use 'silent' mode in uploadFileToId if possible, but here we might want toast feedback
+        // For Planner, we usually want to just save.
 
-        const res = await fetch('/api/drive/upload/proxy', {
-            method: 'POST',
-            body: formData
-        });
-
-        if (!res.ok) {
-            const err = await res.json();
-            throw new Error(err.error || 'Upload failed');
-        }
-        return 'SUCCESS';
+        // We can reuse uploadFileToId
+        const res = await uploadFileToId(file, parentId || currentFolderId, undefined, resolution, false);
+        if (res === 'ERROR' || res === 'CANCELLED') throw new Error("Upload failed");
+        return res;
     };
 
     const handleCreatePlannerClick = () => {
@@ -310,8 +310,8 @@ export default function DrivePage() {
 
             const file = new File([initialContent], fileName, { type: 'text/plain' });
 
-            // Use Proxy Upload
-            await uploadProxyFile(file);
+            // Use Direct Upload
+            await uploadDirectWrapper(file, currentFolderId, 'overwrite');
             showToast("Planner created", "success");
             fetchNodes(true);
         } catch (e) {
@@ -328,7 +328,7 @@ export default function DrivePage() {
         const file = new File([content], fileName, { type: 'text/plain' });
 
         try {
-            await uploadProxyFile(file);
+            await uploadDirectWrapper(file, plannerState.file.parent_id, 'overwrite');
             fetchNodes(true, true);
             showToast("Planner saved successfully", "success");
         } catch (e) {
@@ -390,6 +390,10 @@ export default function DrivePage() {
         setSelectedNodeIds(new Set());
     }, [currentFolderId, urlProjectId]);
 
+    const safeSetConflictInfoNull = () => {
+        isConflictModalActiveRef.current = false;
+        setConflictInfo(null);
+    };
     const toggleNodeSelection = (id: string) => {
         setSelectedNodeIds(prev => {
             const next = new Set(prev);
@@ -435,8 +439,8 @@ export default function DrivePage() {
         updateTask(toastId, 'SUCCESS');
         showToast(`Moved ${successCount} items to Trash`, 'success');
         setSelectedNodeIds(new Set());
-        fetchNodes(true);
         setDeleteModal(prev => ({ ...prev, isOpen: false }));
+        fetchNodes(true);
     };
 
     const handleBulkDelete = () => {
@@ -526,7 +530,7 @@ export default function DrivePage() {
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [nodes, selectedNodeIds, isRenameModalOpen, isShareModalOpen, isProjectSettingsOpen, deleteModal.isOpen]);
+    }, [nodes, selectedNodeIds, isRenameModalOpen, isShareModalOpen, isProjectSettingsOpen, deleteModal.isOpen, contextMenu, handleBulkDelete]);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -746,7 +750,7 @@ export default function DrivePage() {
         const fetchWhitelist = async () => {
             try {
                 const { data } = await supabase.from('whitelist').select('email').order('email');
-                if (data) setWhitelist(data.map(u => u.email));
+                if (data) setWhitelist(data.map((u: any) => u.email));
             } catch (error) {
                 console.error("Error fetching whitelist:", error);
             } finally {
@@ -754,7 +758,7 @@ export default function DrivePage() {
             }
         };
         fetchWhitelist();
-    }, []);
+    }, [supabase]);
 
 
     // fetchProjects removed (handled by Context)
@@ -840,14 +844,14 @@ export default function DrivePage() {
             // Fetch members
             const fetchData = async () => {
                 try {
-                    // Fetch existing members
-                    const { data: membersData, error: membersError } = await supabase
-                        .from('project_members')
-                        .select('user_email')
-                        .eq('project_id', currentProject.id);
+                    // Fetch existing members - ALREADY FETCHED IN onClick via API to bypass RLS
+                    // const { data: membersData, error: membersError } = await supabase
+                    //     .from('project_members')
+                    //     .select('user_email')
+                    //     .eq('project_id', currentProject.id);
 
-                    if (membersError) throw membersError;
-                    if (membersData) setProjectMembers(membersData.map(d => d.user_email));
+                    // if (membersError) throw membersError;
+                    // if (membersData) setProjectMembers(membersData.map(d => d.user_email));
 
                     // Fetch Whitelist for dropdown
                     const { data: whitelistData, error: whitelistError } = await supabase
@@ -855,7 +859,7 @@ export default function DrivePage() {
                         .select('email');
 
                     if (whitelistError) throw whitelistError;
-                    if (whitelistData) setWhitelist(whitelistData.map(row => row.email));
+                    if (whitelistData) setWhitelist(whitelistData.map((row: any) => row.email));
 
                 } catch (e) {
                     console.error("Error fetching project settings data:", e);
@@ -882,7 +886,7 @@ export default function DrivePage() {
                 try {
                     const { data, error } = await supabase.from('whitelist').select('email');
                     if (error) throw error;
-                    if (data) setWhitelist(data.map(d => d.email));
+                    if (data) setWhitelist(data.map((d: any) => d.email));
                 } catch (e) {
                     console.error("Failed to fetch whitelist", e);
                 } finally {
@@ -956,15 +960,15 @@ export default function DrivePage() {
     }
 
     // Task Helpers
-    const addTask = (type: 'UPLOAD' | 'DELETE', name: string) => {
+    const addTask = (type: TaskType, name: string, extras: Partial<AsyncTask> = {}) => {
         const id = uuidv4();
-        const newTask: AsyncTask = { id, type, name, status: 'PENDING' };
+        const newTask: AsyncTask = { id, type, name, status: 'PENDING', ...extras };
         setTasks(prev => [...prev, newTask]);
         return id;
     }
 
-    const updateTask = (id: string, status: 'SUCCESS' | 'ERROR' | 'SKIPPED' | 'CANCELLED') => {
-        setTasks(prev => prev.map(t => t.id === id ? { ...t, status } : t));
+    const updateTask = (id: string, status: AsyncTask['status'], extras: Partial<AsyncTask> = {}) => {
+        setTasks(prev => prev.map(t => t.id === id ? { ...t, status, ...extras } : t));
     }
 
     const clearCompletedTasks = () => {
@@ -1034,10 +1038,11 @@ export default function DrivePage() {
     const filesProgressRef = useRef<Map<string, number>>(new Map());
     const batchStatsRef = useRef<{ startTime: number, totalBytes: number }>({ startTime: 0, totalBytes: 0 });
     const lastProgressUpdateRef = useRef<number>(0);
+    const progressHistoryRef = useRef<{ time: number, loaded: number }[]>([]);
 
     const updateGlobalProgress = useCallback(() => {
         const now = Date.now();
-        if (now - lastProgressUpdateRef.current < 200) return; // Throttle 200ms for smoother feel
+        if (now - lastProgressUpdateRef.current < 250) return; // Standard throttle
         lastProgressUpdateRef.current = now;
 
         const totalUploaded = Array.from(filesProgressRef.current.values()).reduce((a, b) => a + b, 0);
@@ -1045,35 +1050,54 @@ export default function DrivePage() {
 
         if (totalBytes === 0 || startTime === 0) return;
 
-        // Progress
+        // 1. Progress Percentage
         const progress = Math.min(100, (totalUploaded / totalBytes) * 100);
 
-        // Speed
-        const elapsedSeconds = (now - startTime) / 1000;
-        const bytesPerSec = elapsedSeconds > 0 ? totalUploaded / elapsedSeconds : 0;
+        // 2. Sliding Window Speed Calculation (More accurate ETA)
+        progressHistoryRef.current.push({ time: now, loaded: totalUploaded });
+        // Keep only last 5 seconds of history
+        if (progressHistoryRef.current.length > 50) progressHistoryRef.current.shift();
 
-        // Formatted Speed
+        // Remove samples older than 5s
+        while (progressHistoryRef.current.length > 2 && now - progressHistoryRef.current[0].time > 5000) {
+            progressHistoryRef.current.shift();
+        }
+
+        const firstSample = progressHistoryRef.current[0];
+        const lastSample = progressHistoryRef.current[progressHistoryRef.current.length - 1];
+
+        const timeDiff = (lastSample.time - firstSample.time) / 1000;
+        const loadedDiff = lastSample.loaded - firstSample.loaded;
+
+        const instantSpeed = timeDiff > 0 ? loadedDiff / timeDiff : 0;
+        const averageSpeed = totalUploaded / ((now - startTime) / 1000);
+
+        // Blend instant and average speed for stability (Standard "Sliding Window" approach)
+        const smoothedSpeed = instantSpeed > 0 ? (instantSpeed * 0.8 + averageSpeed * 0.2) : averageSpeed;
+
+        // 3. Formatted Stats
         const formatSpeed = (bps: number) => {
+            if (bps < 1024) return `${bps.toFixed(0)} B/s`;
             if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
             return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
         };
 
-        // ETA
-        const remainingBytes = totalBytes - totalUploaded;
-        const secondsRemaining = bytesPerSec > 0 ? remainingBytes / bytesPerSec : 0;
-
         const formatTime = (sec: number) => {
-            if (!isFinite(sec) || sec < 0) return '--';
+            if (!isFinite(sec) || sec <= 0) return '--';
             if (sec < 60) return `${Math.ceil(sec)}s`;
             const min = Math.floor(sec / 60);
             if (min < 60) return `${min}m ${Math.ceil(sec % 60)}s`;
-            return `${Math.floor(min / 60)}h ${min % 60}m`;
+            const hour = Math.floor(min / 60);
+            return `${hour}h ${min % 60}m`;
         };
+
+        const remainingBytes = totalBytes - totalUploaded;
+        const etaSeconds = smoothedSpeed > 0 ? remainingBytes / smoothedSpeed : 0;
 
         setUploadStats({
             progress,
-            speed: formatSpeed(bytesPerSec),
-            eta: formatTime(secondsRemaining)
+            speed: formatSpeed(smoothedSpeed),
+            eta: formatTime(etaSeconds)
         });
     }, []);
 
@@ -1084,25 +1108,38 @@ export default function DrivePage() {
 
         const uploadDirectly = async (): Promise<'SUCCESS' | 'CONFLICT' | 'ERROR' | 'CANCELLED'> => {
             try {
-                // 1. Init Upload (Get Presigned URL)
-                const initRes = await fetch('/api/drive/upload/init', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        filename: cleanName,
-                        fileSize: file.size,
-                        fileType: file.type,
-                        parentId,
-                        projectId: currentProject?.id,
-                        resolution,
-                        silent
-                    })
-                });
+                // 1. Init Upload (Get Presigned URL) - with timeout
+                const initController = new AbortController();
+                const initTimeoutId = setTimeout(() => initController.abort(), 30000); // 30s timeout
+
+                let initRes;
+                try {
+                    initRes = await fetch('/api/drive/upload/init', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            filename: cleanName,
+                            fileSize: file.size,
+                            fileType: file.type,
+                            parentId,
+                            projectId: currentProject?.id,
+                            resolution,
+                            silent
+                        }),
+                        signal: initController.signal
+                    });
+                } finally {
+                    clearTimeout(initTimeoutId);
+                }
 
                 if (initRes.status === 409) {
                     const conflictData = await initRes.json();
-                    if (conflictData.conflict) {
-                        setConflictInfo({ file, parentId, taskId, data: conflictData.existing });
+                    if (conflictData?.conflict) {
+                        // Only show modal if no resolution is set AND no other modal is active
+                        if (!resolution && !isConflictModalActiveRef.current) {
+                            isConflictModalActiveRef.current = true; // Set the lock
+                            setConflictInfo({ file, parentId, taskId, data: conflictData.existing });
+                        }
                         return 'CONFLICT';
                     }
                 }
@@ -1115,7 +1152,6 @@ export default function DrivePage() {
                 const { url, key, resolvedProjectId } = await initRes.json();
 
                 // 2. Direct Upload to R2 (PUT)
-                // We use XMLHttpRequest for progress tracking, as fetch doesn't support upload progress yet (in standard)
                 await new Promise((resolve, reject) => {
                     const xhr = new XMLHttpRequest();
                     if (abortControllerRef.current) {
@@ -1124,6 +1160,9 @@ export default function DrivePage() {
 
                     xhr.open('PUT', url, true);
                     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+
+                    // No timeout for large uploads, but maybe monitor progress?
+                    // For now, assume network connectivity is main issue handled by xhr.onerror
 
                     xhr.upload.onprogress = (event) => {
                         if (event.lengthComputable) {
@@ -1134,9 +1173,14 @@ export default function DrivePage() {
 
                     xhr.onload = () => {
                         if (xhr.status >= 200 && xhr.status < 300) {
-                            resolve('SUCCESS');
+                            // Check if S3/R2 threw a fake 200 OK Error
+                            if (xhr.responseText && xhr.responseText.includes('<Error>')) {
+                                reject(new Error(`S3 Error inside 200: ${xhr.responseText}`));
+                            } else {
+                                resolve('SUCCESS');
+                            }
                         } else {
-                            reject(new Error(`Upload failed with status ${xhr.status}`));
+                            reject(new Error(`Upload failed with status ${xhr.status} ${xhr.statusText}: ${xhr.responseText}`));
                         }
                     };
 
@@ -1149,20 +1193,29 @@ export default function DrivePage() {
                 filesProgressRef.current.set(taskId, file.size); // Ensure 100%
                 updateGlobalProgress();
 
-                // 3. Complete Upload
-                const completeRes = await fetch('/api/drive/upload/complete', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        key,
-                        filename: cleanName,
-                        type: file.type,
-                        projectId: resolvedProjectId,
-                        parentId,
-                        resolution,
-                        silent
-                    })
-                });
+                // 3. Complete Upload - with timeout
+                const completeController = new AbortController();
+                const completeTimeoutId = setTimeout(() => completeController.abort(), 30000); // 30s timeout
+
+                let completeRes;
+                try {
+                    completeRes = await fetch('/api/drive/upload/complete', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            key,
+                            filename: cleanName,
+                            type: file.type,
+                            projectId: resolvedProjectId,
+                            parentId,
+                            resolution,
+                            silent
+                        }),
+                        signal: completeController.signal
+                    });
+                } finally {
+                    clearTimeout(completeTimeoutId);
+                }
 
                 if (!completeRes.ok) {
                     const err = await completeRes.json();
@@ -1177,15 +1230,25 @@ export default function DrivePage() {
                 return 'SUCCESS';
 
             } catch (e: any) {
-                if (e.message === 'Cancelled') {
-                    updateTask(taskId, 'CANCELLED');
-                    return 'CANCELLED';
+                if (e.name === 'AbortError' || e.message === 'Cancelled') {
+                    if (abortControllerRef.current?.signal.aborted) {
+                        updateTask(taskId, 'CANCELLED');
+                        return 'CANCELLED';
+                    }
+                    console.error(`Upload timeout/abort for ${cleanName}`);
                 }
-                console.error(`Upload error for ${cleanName}:`, e);
 
-                // Detailed logging for large files
-                if (file.size > 10 * 1024 * 1024) {
-                    console.warn(`Large file upload failed. size: ${(file.size / 1024 / 1024).toFixed(2)}MB, error: ${e.message}`);
+                // Standard Error Categorization
+                let errorMessage = e.message || 'Unknown error';
+                if (errorMessage.includes('403')) errorMessage = "Access Denied / Storage Limit Exceeded";
+                if (errorMessage.includes('413')) errorMessage = "File too large for service limits";
+                if (errorMessage.includes('Network error')) errorMessage = "Connection lost. Retrying...";
+
+                console.error(`Upload error for ${cleanName}:`, errorMessage, e);
+
+                // Log specific warnings for large files
+                if (file.size > 20 * 1024 * 1024) {
+                    console.warn(`Heavy file (${(file.size / 1024 / 1024).toFixed(1)}MB) encountered error: ${errorMessage}`);
                 }
 
                 updateTask(taskId, 'ERROR');
@@ -1194,37 +1257,17 @@ export default function DrivePage() {
         };
 
         return uploadDirectly();
-
-        /* Legacy Direct Upload Code - Removed for Stability
+    };      /* Legacy Direct Upload Code - Removed for Stability
         try {
             // STEP 1: INITIALIZE (Get Presigned URL)
             const initRes = await fetch('/api/drive/upload/init', { ... }); 
              ... 
         } ...
         */
-    };
+
 
     const uploadFile = async (file: File) => {
-        batchStatsRef.current = { startTime: Date.now(), totalBytes: file.size };
-        filesProgressRef.current.clear();
-        setUploadStats({}); // Reset UI
-
-        let retries = 3;
-        while (retries > 0) {
-            try {
-                const result = await uploadFileToId(file, currentFolderId);
-                if (result === 'SUCCESS' || result === 'CONFLICT' || result === 'CANCELLED') break;
-                // If ERROR, we retry
-                throw new Error("Upload failed");
-            } catch (e) {
-                retries--;
-                if (retries === 0) {
-                    showToast("Failed to upload file after 3 attempts.", "error");
-                } else {
-                    await new Promise(r => setTimeout(r, 1000 * (4 - retries))); // 1s, 2s...
-                }
-            }
-        }
+        await uploadFilesConcurrent([file], () => currentFolderId);
     }
 
 
@@ -1264,8 +1307,8 @@ export default function DrivePage() {
     }
 
     // Generic Concurrent Upload Helper
-    const uploadFilesConcurrent = async (files: File[], parentIdResolver: (file: File) => string | null) => {
-        const CONCURRENCY_LIMIT = 3; // Reduced from 5 for better stability with large files
+    const uploadFilesConcurrent = async (files: File[], parentIdResolver: (file: File) => string | null, precreatedTasks?: Map<File, string>, metaTaskId?: string): Promise<number> => {
+        const CONCURRENCY_LIMIT = 10; // Increased for faster processing of small files
         const pool: Promise<void>[] = [];
 
         // Initialize Batch Stats if not already set (e.g. by startFolderUpload)
@@ -1281,6 +1324,7 @@ export default function DrivePage() {
             const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
             batchStatsRef.current = { startTime: Date.now(), totalBytes };
             filesProgressRef.current.clear();
+            batchResolutionRef.current = null; // Reset for new batch
             setUploadStats({});
         } else {
             // Append stats
@@ -1289,83 +1333,96 @@ export default function DrivePage() {
 
         // Create Tasks globally first (Visual feedback)
         const fileTasks = files.map(file => {
+            if (precreatedTasks && precreatedTasks.has(file)) {
+                const cleanName = file.name.split('/').pop()?.split('\\').pop() || file.name;
+                return { id: precreatedTasks.get(file)!, file, name: cleanName };
+            }
             const cleanName = file.name.split('/').pop()?.split('\\').pop() || file.name;
-            const id = uuidv4();
+            const id = addTask('UPLOAD', cleanName);
             return { id, file, name: cleanName };
         });
 
-        // Add to UI (Tasks)
-        const newUiTasks: AsyncTask[] = fileTasks.map(t => ({
-            id: t.id,
-            type: 'UPLOAD',
-            name: t.name,
-            status: 'PENDING'
-        }));
-        setTasks(prev => [...prev, ...newUiTasks]);
+        // Process with Worker Pool Pattern
+        const queue = [...fileTasks];
+        const workersCount = Math.min(CONCURRENCY_LIMIT, files.length);
 
-        // Add to UI (Optimistic Nodes)
-        const newOptimisticNodes: StorageNode[] = fileTasks.map(t => ({
-            id: `optimistic-${t.id}`,
-            name: t.name,
-            type: 'FILE',
-            size: t.file.size,
-            updated_at: new Date().toISOString(),
-            owner_email: userEmail || 'You',
-            parent_id: parentIdResolver(t.file) || currentFolderId,
-            project_id: currentProject?.id || '',
-            is_trashed: false,
-            version: 1,
-            created_at: new Date().toISOString(),
-            sharing_scope: 'PRIVATE'
-        }));
-        setOptimisticNodes(prev => [...prev, ...newOptimisticNodes]);
+        let localCompletedCount = 0;
 
-        // Process
-        for (let i = 0; i < files.length; i++) {
-            if (!isUploadingRef.current) break;
+        const runWorker = async () => {
+            while (queue.length > 0 && isUploadingRef.current) {
+                const taskInfo = queue.shift();
+                if (!taskInfo) break;
 
-            const file = files[i];
-            const taskId = fileTasks[i].id;
-            const targetParentId = parentIdResolver(file) || currentFolderId;
+                const { file, id: taskId } = taskInfo;
+                const targetParentId = parentIdResolver(file) || currentFolderId;
 
-            const task = async () => {
                 let retries = 3;
-                const backoffStart = 1000;
                 while (retries > 0) {
                     if (!isUploadingRef.current) break;
+
                     try {
-                        const status = await uploadFileToId(file, targetParentId, taskId, undefined, true);
-                        if (status === 'SUCCESS' || status === 'CONFLICT' || status === 'CANCELLED') break;
-                    } catch (e) { console.error(e); }
+                        // Check if we already have a global resolution
+                        if (batchResolutionRef.current === 'skip') {
+                            localCompletedCount++;
+                            if (metaTaskId) updateTask(metaTaskId, 'PENDING', { completedItems: localCompletedCount });
+                            updateTask(taskId, 'SKIPPED');
+                            break;
+                        }
+
+                        const currentRes = batchResolutionRef.current || undefined;
+                        const status = await uploadFileToId(file, targetParentId, taskId, currentRes as any, true);
+
+                        if (status === 'CONFLICT') {
+                            // If we have a global resolution, the loop 'continue' above should have handled it.
+                            // If we reach here, it means we hit a conflict and need user input OR we're waiting for another modal.
+
+                            while (isUploadingRef.current) {
+                                if (batchResolutionRef.current) break; // Global resolution reached!
+                                if (!isConflictModalActiveRef.current) break; // Modal is free, we can try to take it
+                                await new Promise(r => setTimeout(r, 500));
+                            }
+
+                            if (!isUploadingRef.current) break;
+                            continue; // Re-try with the new state (either global resolution or we show the modal)
+                        }
+
+                        if (status === 'SUCCESS') {
+                            localCompletedCount++;
+                            if (metaTaskId) {
+                                // Update metadata task status (GDrive Style)
+                                updateTask(metaTaskId, 'PENDING', { completedItems: localCompletedCount });
+                            }
+                            break;
+                        }
+                        if (status === 'CANCELLED') break;
+                    } catch (e: any) {
+                        console.error(`Attempt ${4 - retries} failed for ${file.name}:`, e);
+                    }
 
                     retries--;
                     if (retries > 0 && isUploadingRef.current) {
-                        await new Promise(r => setTimeout(r, backoffStart * Math.pow(2, 3 - retries - 1)));
+                        // Exponential backoff: 1s, 2s, 4s...
+                        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, 3 - retries - 1)));
                     }
                 }
-            };
 
-            const p = task().then(() => {
-                const idx = pool.indexOf(p);
-                if (idx !== -1) pool.splice(idx, 1);
-            });
-            pool.push(p);
-
-            if (i % 20 === 0) refreshStorage();
-
-            if (pool.length >= CONCURRENCY_LIMIT) {
-                await Promise.race(pool);
+                if (queue.length % 50 === 0) refreshStorage();
             }
-        }
+        };
 
-        await Promise.all(pool);
+        // Start Workers
+        const workers = Array(workersCount).fill(null).map(() => runWorker());
+        await Promise.all(workers);
 
         if (isNewBatch) {
             isUploadingRef.current = false;
             fetchNodes(true);
             refreshStorage();
             setOptimisticNodes([]);
+            progressHistoryRef.current = []; // Clear history
         }
+
+        return localCompletedCount;
     };
 
     // Stop Upload Handler
@@ -1380,66 +1437,100 @@ export default function DrivePage() {
         }
     };
 
-    const startFolderUpload = async () => {
+    const [pendingFolderParentId, setPendingFolderParentId] = useState<string | null>(null);
+
+    const startFolderUpload = async (targetIdOverride: string | null = null) => {
         if (!pendingFolderUpload) return;
         setIsFolderUploadModalOpen(false);
-
-        const files = pendingFolderUpload;
-
-        // 0. Initialize Cancellation & Stats
-        abortControllerRef.current = new AbortController();
-        isUploadingRef.current = true;
-
-        // Initialize Stats
-        const totalBatchBytes = files.reduce((acc, f) => acc + f.size, 0);
-        batchStatsRef.current = { startTime: Date.now(), totalBytes: totalBatchBytes };
-        filesProgressRef.current.clear();
-        setUploadStats({});
-
-        showToast(`Starting upload of ${files.length} items from folder...`, 'info');
-
-        // 1. PRE-CREATE ALL TASKS
-        // This ensures the user sees "Uploading 0/113" immediately
-        const newTasks: AsyncTask[] = files.map(file => {
-            const cleanName = file.name.split('/').pop()?.split('\\').pop() || file.name;
-            return {
-                id: uuidv4(),
-                type: 'UPLOAD',
-                name: cleanName,
-                status: 'PENDING'
-            };
-        });
-
-        const fileTaskIds = newTasks.map(t => t.id);
-
-        setTasks(prev => [...prev, ...newTasks]);
-
-        // Path -> FolderID map
-        const folderIdMap = new Map<string, string>();
-        if (currentFolderId) folderIdMap.set("", currentFolderId);
-
-        // 1. Build list of all folders needed
-        const neededFolders = new Set<string>();
-        const filesArray = files; // files is already File[]
-
-        for (const file of filesArray) {
-            const path = file.webkitRelativePath; // "Folder/Sub/File.txt"
-            const parts = path.split('/');
-            parts.pop(); // Remove filename
-
-            // Generate all subpaths: "Folder", "Folder/Sub"
-            let currentPath = "";
-            for (const part of parts) {
-                currentPath = currentPath ? `${currentPath}/${part}` : part;
-                neededFolders.add(currentPath);
-            }
-        }
-
-        // 2. Create folders in order of depth (shortest path first)
-        const sortedFolders = Array.from(neededFolders).sort((a, b) => a.split('/').length - b.split('/').length);
+        const targetParentId = targetIdOverride || pendingFolderParentId || currentFolderId;
 
         try {
+            const files = pendingFolderUpload;
+
+            // 0. Initialize Cancellation & Stats
+            abortControllerRef.current = new AbortController();
+            isUploadingRef.current = true;
+
+            // Initialize Stats - REMOVED (Handled by uploadFilesConcurrent)
+            setUploadStats({});
+
+            showToast(`Starting upload of ${files.length} items from folder...`, 'info');
+
+            // Create Summary Task (GDrive Style)
+            const rootFolderName = files[0].webkitRelativePath?.split('/')[0] || "Folder Upload";
+            const folderTaskId = addTask('FOLDER_UPLOAD', rootFolderName, {
+                totalItems: files.length,
+                completedItems: 0
+            });
+
+            // Still map files for optimistic UI rows, but we bypass adding them to TaskProgress list
+            const taskMap = new Map<File, string>();
+            files.forEach(f => taskMap.set(f, uuidv4()));
+
+            // Path -> FolderID map
+            const folderIdMap = new Map<string, string>();
+            // Explicitly map Root "" to safeTargetParentId
+            const safeTargetParentId = (targetParentId === 'null' || !targetParentId) ? null : targetParentId;
+            folderIdMap.set("", safeTargetParentId as any);
+
+            // 1. Build list of all folders needed
+            const neededFolders = new Set<string>();
+            const filesArray = files; // files is already File[]
+
+            for (const file of filesArray) {
+                let path = file.webkitRelativePath.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\//, '');
+
+                const parts = path.split('/');
+                parts.pop(); // Remove filename
+
+                // Generate subpaths correctly: "Folder", "Folder/Sub"
+                let currentPath = "";
+                for (let i = 0; i < parts.length; i++) {
+                    const part = parts[i];
+                    if (!part) continue;
+                    // Always build path relative to the target selection
+                    currentPath = currentPath ? `${currentPath}/${part}` : part;
+                    neededFolders.add(currentPath);
+                }
+            }
+
+            // 2. Create folders in batch (Optimized)
+            const sortedFolders = Array.from(neededFolders).sort((a, b) => a.split('/').length - b.split('/').length);
+
             try {
+                // Extended timeout for batch folder creation
+                const batchController = new AbortController();
+                const bTimeout = setTimeout(() => batchController.abort(), 60000); // 60s
+
+                const batchRes = await fetch('/api/drive/folders/batch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        paths: sortedFolders,
+                        projectId: currentProject?.id,
+                        parentId: targetParentId,
+                        silent: false
+                    }),
+                    signal: batchController.signal
+                });
+                clearTimeout(bTimeout);
+
+                if (!batchRes.ok) {
+                    console.error("Batch folder creation failed, falling back to sequential.");
+                    throw new Error("Batch failed");
+                }
+
+                const { map } = await batchRes.json();
+
+                // Merge map
+                Object.keys(map).forEach(path => {
+                    // Always set, even if it's the root "" (to overwrite our safeTargetParentId if needed)
+                    if (map[path]) folderIdMap.set(path, map[path]);
+                });
+
+            } catch (e) {
+                console.warn("Batch folder creation error, falling back to sequential legacy mode", e);
+                // Fallback: Sequential Legacy Creation
                 for (const folderPath of sortedFolders) {
                     if (!isUploadingRef.current) break; // STOP CHECK
 
@@ -1447,51 +1538,87 @@ export default function DrivePage() {
                     const folderName = parts[parts.length - 1];
                     const parentPath = parts.slice(0, -1).join('/');
 
-                    let realParentId: string | null = null;
-                    if (parentPath === "") {
-                        realParentId = currentFolderId;
-                    } else {
-                        // CRITICAL FIX: Do NOT fallback to currentFolderId if parent is missing.
-                        // If 'A/B' exists but we are processing 'A/B/C', we need ID of 'A/B'.
-                        // If it's missing (creation failed), we should probably skip this folder to avoid chaos.
-                        const foundId = folderIdMap.get(parentPath);
-                        if (!foundId) {
-                            console.warn(`Skipping folder ${folderPath} because parent ${parentPath} failed to create.`);
-                            continue;
-                        }
-                        realParentId = foundId;
-                    }
+                    let realParentId = folderIdMap.get(parentPath) || targetParentId;
 
-                    // Loop Retry Logic for folder creation
+                    // Retry Logic
                     let retries = 3;
-                    let folderId = "";
                     while (retries > 0) {
                         try {
-                            folderId = await getOrCreateFolder(folderName, realParentId, true);
+                            const fid = await getOrCreateFolder(folderName, realParentId, true);
+                            if (fid) {
+                                folderIdMap.set(folderPath, fid);
+                            }
                             break;
-                        } catch (e) {
+                        } catch (err) {
                             retries--;
-                            if (retries === 0) console.error(`Failed to create folder ${folderName} after 3 attempts`);
                             await new Promise(r => setTimeout(r, 500));
                         }
                     }
-
-                    if (folderId) {
-                        folderIdMap.set(folderPath, folderId);
-                    }
                 }
-            } catch (folderErr) {
-                console.error("Folder creation interrupted", folderErr);
             }
 
-            // 3. Upload files with Concurrency Pool
-            // Reuse the new helper
-            await uploadFilesConcurrent(files, (file) => {
-                const pathParts = file.webkitRelativePath.split('/');
+            // 3. Add to UI (Optimistic Nodes) - Create nodes for FOLDERS and FILES 
+            const folderNodes: StorageNode[] = Array.from(neededFolders).map(path => {
+                const parts = path.split('/');
+                const name = parts[parts.length - 1];
+                const parentPath = parts.slice(0, -1).join('/');
+                const resolvedParentId = folderIdMap.get(parentPath) || safeTargetParentId;
+
+                return {
+                    id: `opt-folder-${path}`,
+                    name: name,
+                    type: 'FOLDER',
+                    updated_at: new Date().toISOString(),
+                    owner_email: userEmail || 'You',
+                    parent_id: resolvedParentId as any,
+                    project_id: currentProject?.id || '',
+                    is_trashed: false,
+                    version: 1,
+                    created_at: new Date().toISOString(),
+                    sharing_scope: 'PRIVATE'
+                };
+            });
+
+            const fileNodes: StorageNode[] = files.map(file => {
+                const taskId = taskMap.get(file)!;
+                let path = file.webkitRelativePath.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\//, '');
+                const pathParts = path.split('/');
                 pathParts.pop();
                 const folderPath = pathParts.join('/');
-                return folderIdMap.get(folderPath) || currentFolderId;
+                const resolvedParentId = folderIdMap.get(folderPath) || safeTargetParentId;
+
+                return {
+                    id: `optimistic-${taskId}`,
+                    name: file.name.split(/[/\\]/).pop() || file.name,
+                    type: 'FILE',
+                    size: file.size,
+                    updated_at: new Date().toISOString(),
+                    owner_email: userEmail || 'You',
+                    parent_id: resolvedParentId as any,
+                    project_id: currentProject?.id || '',
+                    is_trashed: false,
+                    version: 1,
+                    created_at: new Date().toISOString(),
+                    sharing_scope: 'PRIVATE'
+                };
             });
+            setOptimisticNodes(prev => [...prev, ...folderNodes, ...fileNodes]);
+
+            const completedCount = await uploadFilesConcurrent(files, (file) => {
+                let path = file.webkitRelativePath.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\//, '');
+                const pathParts = path.split('/');
+                pathParts.pop();
+                const folderPath = pathParts.join('/');
+                return folderIdMap.get(folderPath) || safeTargetParentId;
+            }, taskMap, folderTaskId);
+
+            if (completedCount === files.length) {
+                updateTask(folderTaskId, 'SUCCESS');
+            } else if (!isUploadingRef.current) {
+                updateTask(folderTaskId, 'CANCELLED');
+            } else {
+                updateTask(folderTaskId, 'ERROR');
+            }
 
             // Removed legacy manual pool logic as we use uploadFilesConcurrent now
 
@@ -1508,7 +1635,6 @@ export default function DrivePage() {
                     })
                 }).catch(e => console.error("Folder notification failed", e));
             }
-
             isUploadingRef.current = false;
             fetchNodes(true);
             refreshStorage();
@@ -1644,17 +1770,11 @@ export default function DrivePage() {
         return [];
     };
 
-    const handleDrop = async (e: React.DragEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-        setDragActive(false);
+    // Extract shared drop logic for reuse
+    const processDroppedItems = async (dataTransfer: DataTransfer, targetFolderIdOverride?: string) => {
+        const items = dataTransfer.items;
+        const targetId = targetFolderIdOverride || currentFolderId;
 
-        // If dragging internal node, ignore main drop area (Move happens in row onDrop)
-        if (draggedNode) return;
-
-        const items = e.dataTransfer.items;
-
-        // Advanced Folder/File Drop Support
         if (items && items.length > 0 && typeof items[0].webkitGetAsEntry === 'function') {
             const entries = [];
             for (let i = 0; i < items.length; i++) {
@@ -1667,7 +1787,6 @@ export default function DrivePage() {
             if (entries.length > 0) {
                 showToast("Processing files...", "info");
                 const allFiles: File[] = [];
-
                 for (const entry of entries) {
                     const files = await traverseFileTree(entry);
                     allFiles.push(...files);
@@ -1677,22 +1796,49 @@ export default function DrivePage() {
                     const totalSize = allFiles.reduce((acc, file) => acc + file.size, 0);
                     const sizeMB = (totalSize / (1024 * 1024)).toFixed(2) + ' MB';
 
+                    // If dropping onto a specific folder, we skip the confirmation modal 
+                    // for simple files, but maybe keep for folders?
+                    // Let's stick to standard behavior: if it's many files, show modal.
                     setPendingFolderUpload(allFiles);
                     setPendingFolderStats({ count: allFiles.length, size: sizeMB });
+                    setPendingFolderParentId(targetId);
                     setIsFolderUploadModalOpen(true);
+
+                    // Workaround: We need to tell startFolderUpload WHERE to upload
+                    // Since startFolderUpload uses currentFolderId, we temporary override if needed
+                    // (Actually, startFolderUpload should be updated to accept a parentId)
                 }
                 return;
             }
         }
 
-        // Simple Drop fallback
-        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-            const files = Array.from(e.dataTransfer.files);
-            await uploadFilesConcurrent(files, () => currentFolderId);
+        if (dataTransfer.files && dataTransfer.files.length > 0) {
+            const files = Array.from(dataTransfer.files);
+            await uploadFilesConcurrent(files, () => targetId);
             fetchNodes(true);
             refreshStorage();
         }
     };
+
+    const handleDrop = async (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setDragActive(false);
+        if (draggedNode) return;
+
+        await processDroppedItems(e.dataTransfer);
+    };
+
+    // Listen for folder-specific drops
+    useEffect(() => {
+        const handler = (e: any) => {
+            const { files, targetFolderId } = e.detail;
+            processDroppedItems(files, targetFolderId);
+        };
+        window.addEventListener('folder-drop-upload', handler);
+        return () => window.removeEventListener('folder-drop-upload', handler);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [currentFolderId]); // Re-bind if context changes
 
     const navigateToFolder = (folder: StorageNode) => {
         const projectKey = urlProjectId; // Use the same key from current URL (name or ID)
@@ -2047,6 +2193,7 @@ export default function DrivePage() {
                                             if (res.ok) {
                                                 const data = await res.json();
                                                 setProjectSettings(data);
+                                                setProjectMembers(data.members || []);
                                                 setIsProjectSettingsOpen(true);
                                             }
                                         }}
@@ -2254,7 +2401,7 @@ export default function DrivePage() {
                                     Cancel
                                 </button>
                                 <button
-                                    onClick={startFolderUpload}
+                                    onClick={() => startFolderUpload()}
                                     className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold shadow-lg shadow-blue-200 transition-all transform active:scale-95"
                                 >
                                     Start Upload
@@ -2812,7 +2959,9 @@ export default function DrivePage() {
                                 <div className="space-y-3">
                                     <button
                                         onClick={() => {
+                                            if (isApplyToAll) batchResolutionRef.current = 'update';
                                             uploadFileToId(conflictInfo.file, conflictInfo.parentId, conflictInfo.taskId, 'update');
+                                            isConflictModalActiveRef.current = false;
                                             setConflictInfo(null);
                                         }}
                                         className="w-full flex flex-col items-start p-4 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-xl transition-all group"
@@ -2827,7 +2976,9 @@ export default function DrivePage() {
                                     {conflictInfo.data.isOwnerOrAdmin && (
                                         <button
                                             onClick={() => {
+                                                if (isApplyToAll) batchResolutionRef.current = 'overwrite';
                                                 uploadFileToId(conflictInfo.file, conflictInfo.parentId, conflictInfo.taskId, 'overwrite');
+                                                isConflictModalActiveRef.current = false;
                                                 setConflictInfo(null);
                                             }}
                                             className="w-full flex flex-col items-start p-4 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-xl transition-all group"
@@ -2842,10 +2993,40 @@ export default function DrivePage() {
 
                                     <button
                                         onClick={() => {
-                                            if (conflictInfo.taskId) updateTask(conflictInfo.taskId, 'CANCELLED');
+                                            if (isApplyToAll) batchResolutionRef.current = 'skip';
+                                            if (conflictInfo.taskId) updateTask(conflictInfo.taskId, 'SKIPPED');
+                                            isConflictModalActiveRef.current = false;
                                             setConflictInfo(null);
                                         }}
-                                        className="w-full py-3 text-slate-500 hover:text-slate-700 font-medium transition-colors"
+                                        className="w-full flex flex-col items-start p-4 bg-slate-50 hover:bg-slate-100 text-slate-500 rounded-xl transition-all group"
+                                    >
+                                        <div className="flex items-center gap-2 font-bold mb-0.5">
+                                            <X className="w-4 h-4" />
+                                            Skip This File
+                                        </div>
+                                        <div className="text-xs text-slate-400 font-normal italic">Do nothing and continue with next file</div>
+                                    </button>
+
+                                    <div className="flex items-center gap-2 px-4 py-2 bg-slate-50/50 rounded-lg border border-slate-100">
+                                        <input
+                                            type="checkbox"
+                                            id="applyAll"
+                                            checked={isApplyToAll}
+                                            onChange={(e) => setIsApplyToAll(e.target.checked)}
+                                            className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                        />
+                                        <label htmlFor="applyAll" className="text-xs font-bold text-slate-600 cursor-pointer">
+                                            Apply to all remaining conflicts
+                                        </label>
+                                    </div>
+
+                                    <button
+                                        onClick={() => {
+                                            if (conflictInfo.taskId) updateTask(conflictInfo.taskId, 'CANCELLED');
+                                            isConflictModalActiveRef.current = false;
+                                            setConflictInfo(null);
+                                        }}
+                                        className="w-full py-2 text-slate-400 hover:text-slate-600 text-xs font-medium transition-colors border-t border-slate-100 mt-2"
                                     >
                                         Cancel Upload
                                     </button>
@@ -2980,10 +3161,12 @@ export default function DrivePage() {
                                             <div className="flex items-center justify-between p-3 bg-blue-50/50 rounded-lg border border-blue-100">
                                                 <div className="flex items-center gap-2">
                                                     <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-xs font-bold text-blue-600">
-                                                        {currentProject.created_by?.substring(0, 2).toUpperCase()}
+                                                        {(currentProject.created_by === userId ? userEmail : currentProject.created_by)?.substring(0, 2).toUpperCase()}
                                                     </div>
                                                     <div>
-                                                        <p className="text-sm font-bold text-slate-800">{currentProject.created_by}</p>
+                                                        <p className="text-sm font-bold text-slate-800">
+                                                            {currentProject.created_by === userId ? userEmail : currentProject.created_by}
+                                                        </p>
                                                         <span className="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-bold uppercase">Owner</span>
                                                     </div>
                                                 </div>
