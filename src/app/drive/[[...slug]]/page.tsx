@@ -2044,7 +2044,7 @@ export default function DrivePage() {
             <Sidebar />
 
             <main
-                className="flex-1 ml-0 md:ml-64 p-8 relative"
+                className="flex-1 ml-0 md:ml-64 p-4 md:p-8 pt-[72px] md:pt-8 pb-20 md:pb-8 relative"
                 onDragEnter={handleDrag}
                 onDragLeave={handleDrag}
                 onDragOver={handleDrag}

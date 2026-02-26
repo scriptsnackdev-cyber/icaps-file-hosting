@@ -126,7 +126,7 @@ export default function WhitelistPage() {
         <div className="min-h-screen bg-slate-50 flex font-sans text-slate-900">
             <Sidebar />
 
-            <main className="flex-1 ml-0 md:ml-64 p-8 relative">
+            <main className="flex-1 ml-0 md:ml-64 p-4 md:p-8 pt-[72px] md:pt-8 pb-20 md:pb-8 relative">
                 <div className="max-w-5xl mx-auto">
                     {/* Header */}
                     <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">

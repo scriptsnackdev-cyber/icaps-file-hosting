@@ -30,3 +30,18 @@ input::-ms-reveal,
 input::-ms-clear {
   display: none;
 }
+
+/* Hide scrollbar but keep scrollability */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Safe-area bottom padding for devices with home indicator */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}

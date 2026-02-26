@@ -59,35 +59,32 @@ export const DriveToolbar: React.FC<DriveToolbarProps> = ({
     handleMoveNode,
     nodes
 }) => {
+    const isReadOnly = currentProject?.settings?.read_only && !isAdmin;
+
     return (
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6 bg-white p-2 px-4 rounded-full border border-slate-200 shadow-sm relative z-20">
-            {/* Breadcrumbs */}
-            <div className="flex-1 flex items-center gap-1 text-xs text-slate-500 overflow-x-hidden min-w-0">
+        <div className="flex flex-col gap-2 mb-4 md:mb-6 relative z-20">
+            {/* ── Row 1: Breadcrumbs ── */}
+            <div className="flex items-center gap-1 text-xs text-slate-500 bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm overflow-x-auto min-w-0 no-scrollbar">
                 <button
                     onClick={() => navigateUp(-1)}
                     onDragOver={(e) => {
                         if (draggedNode && draggedNode.parent_id !== null) {
-                            e.preventDefault();
-                            e.stopPropagation();
+                            e.preventDefault(); e.stopPropagation();
                             e.dataTransfer.dropEffect = 'move';
                         }
                     }}
                     onDrop={async (e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
+                        e.preventDefault(); e.stopPropagation();
                         if (draggedNode && draggedNode.parent_id !== null) {
                             if (selectedNodeIds.has(draggedNode.id)) {
                                 const itemsToMove = nodes.filter(n => selectedNodeIds.has(n.id));
                                 for (const item of itemsToMove) {
-                                    if (item.parent_id !== null) {
-                                        await handleMoveNode(item, null);
-                                    }
+                                    if (item.parent_id !== null) await handleMoveNode(item, null);
                                 }
                             } else {
                                 await handleMoveNode(draggedNode, null);
                             }
-                            setDraggedNode(null);
-                            setSelectedNodeIds(new Set());
+                            setDraggedNode(null); setSelectedNodeIds(new Set());
                         }
                     }}
                     className={`flex items-center gap-1 hover:text-blue-600 px-2 py-1 rounded-full transition-colors shrink-0 ${!slug || slug.length === 0 ? 'bg-blue-50 text-blue-700 font-semibold' : ''}`}
@@ -102,30 +99,25 @@ export const DriveToolbar: React.FC<DriveToolbarProps> = ({
                             onClick={() => navigateUp(i)}
                             onDragOver={(e) => {
                                 if (draggedNode && draggedNode.id !== f.id && draggedNode.parent_id !== f.id) {
-                                    e.preventDefault();
-                                    e.stopPropagation();
+                                    e.preventDefault(); e.stopPropagation();
                                     e.dataTransfer.dropEffect = 'move';
                                 }
                             }}
                             onDrop={async (e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
+                                e.preventDefault(); e.stopPropagation();
                                 if (draggedNode && draggedNode.id !== f.id && draggedNode.parent_id !== f.id) {
                                     if (selectedNodeIds.has(draggedNode.id)) {
                                         const itemsToMove = nodes.filter(n => selectedNodeIds.has(n.id));
                                         for (const item of itemsToMove) {
-                                            if (item.id !== f.id && item.parent_id !== f.id) {
-                                                await handleMoveNode(item, f.id);
-                                            }
+                                            if (item.id !== f.id && item.parent_id !== f.id) await handleMoveNode(item, f.id);
                                         }
                                     } else {
                                         await handleMoveNode(draggedNode, f.id);
                                     }
-                                    setDraggedNode(null);
-                                    setSelectedNodeIds(new Set());
+                                    setDraggedNode(null); setSelectedNodeIds(new Set());
                                 }
                             }}
-                            className={`hover:text-blue-600 px-2 py-1 rounded-full transition-colors whitespace-nowrap min-w-0 flex items-center ${i === breadcrumbsToRender.length - 1 ? 'bg-blue-50 text-blue-700 font-semibold' : ''}`}
+                            className={`hover:text-blue-600 px-2 py-1 rounded-full transition-colors whitespace-nowrap shrink-0 flex items-center ${i === breadcrumbsToRender.length - 1 ? 'bg-blue-50 text-blue-700 font-semibold' : ''}`}
                         >
                             <span className="max-w-[80px] sm:max-w-[150px] truncate">{f.name}</span>
                         </button>
@@ -133,43 +125,44 @@ export const DriveToolbar: React.FC<DriveToolbarProps> = ({
                 ))}
             </div>
 
-            {/* Controls & Quota */}
-            <div className="flex items-center gap-4 shrink-0">
-                {/* Compact Quota Bar */}
+            {/* ── Row 2: Action buttons ── */}
+            <div className="flex items-center gap-2 justify-between bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm">
+                {/* Left: Quota (hidden on very small) */}
                 {currentProject && (
-                    <div className="hidden sm:flex items-center gap-2 text-[10px] text-slate-400 border-r border-slate-100 pr-4">
+                    <div className="hidden sm:flex items-center gap-2 text-[10px] text-slate-400">
                         <span>Quota:</span>
-                        <div className="w-20 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                        <div className="w-16 h-1.5 bg-slate-100 rounded-full overflow-hidden">
                             <div
                                 className={`h-full transition-all ${(currentProject.current_storage_bytes / currentProject.max_storage_bytes) > 0.9 ? 'bg-red-500' : 'bg-blue-500'}`}
                                 style={{ width: `${Math.min(100, (currentProject.current_storage_bytes / currentProject.max_storage_bytes) * 100)}%` }}
                             />
                         </div>
                         <span className="font-medium text-slate-600">
-                            {(currentProject.current_storage_bytes / (1024 * 1024)).toFixed(1)}MB / {(currentProject.max_storage_bytes / (1024 * 1024)).toFixed(0)}MB
+                            {(currentProject.current_storage_bytes / (1024 * 1024)).toFixed(1)}M / {(currentProject.max_storage_bytes / (1024 * 1024)).toFixed(0)}M
                         </span>
                     </div>
                 )}
 
-                <div className="flex bg-slate-50 p-1 rounded-full gap-1 items-center">
+                {/* Right: Action buttons */}
+                <div className="flex items-center gap-1.5 ml-auto flex-wrap">
                     <button
                         onClick={handleShareClick}
-                        className="flex items-center gap-1.5 px-2.5 py-1 bg-white text-slate-700 rounded-full shadow-sm border border-slate-200 hover:text-blue-600 hover:border-blue-200 transition-all text-[11px] font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="flex items-center gap-1 px-2.5 py-1.5 bg-white text-slate-700 rounded-lg border border-slate-200 hover:text-blue-600 hover:border-blue-200 transition-all text-xs font-medium shadow-sm"
                     >
                         <Share2 className="w-3.5 h-3.5" />
-                        Share
+                        <span className="hidden sm:inline">Share</span>
                     </button>
                     <button
                         onClick={handleMainDownload}
                         disabled={(!currentFolderId && selectedNodeIds.size === 0) || isDownloading}
-                        className="flex items-center gap-1.5 px-2.5 py-1 bg-white text-slate-600 rounded-full shadow-sm border border-slate-200 hover:text-blue-600 hover:border-blue-200 transition-all text-[11px] font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="flex items-center gap-1 px-2.5 py-1.5 bg-white text-slate-600 rounded-lg border border-slate-200 hover:text-blue-600 hover:border-blue-200 transition-all text-xs font-medium shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                         {isDownloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-                        Download
+                        <span className="hidden sm:inline">Download</span>
                     </button>
 
-                    {currentProject?.settings?.read_only && !isAdmin ? (
-                        <div className="flex items-center gap-1.5 px-3 py-1 bg-amber-50 text-amber-600 rounded-full border border-amber-200 text-[10px] font-bold uppercase tracking-wider">
+                    {isReadOnly ? (
+                        <div className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-600 rounded-lg border border-amber-200 text-[10px] font-bold uppercase tracking-wider">
                             <Lock className="w-3 h-3" />
                             Locked
                         </div>
@@ -177,16 +170,16 @@ export const DriveToolbar: React.FC<DriveToolbarProps> = ({
                         <>
                             <button
                                 onClick={handleCreateFolderClick}
-                                className="flex items-center gap-1.5 px-2.5 py-1 bg-white text-slate-600 rounded-full shadow-sm border border-slate-200 hover:text-blue-600 hover:border-blue-200 transition-all text-[11px] font-medium"
+                                className="flex items-center gap-1 px-2.5 py-1.5 bg-white text-slate-600 rounded-lg border border-slate-200 hover:text-blue-600 hover:border-blue-200 transition-all text-xs font-medium shadow-sm"
                             >
                                 <FolderPlus className="w-3.5 h-3.5" />
-                                Folder
+                                <span className="hidden sm:inline">Folder</span>
                             </button>
 
                             <div className="relative">
                                 <button
                                     onClick={(e) => { e.stopPropagation(); setIsUploadMenuOpen(!isUploadMenuOpen); }}
-                                    className="flex items-center gap-1.5 px-3 py-1 bg-blue-600 text-white rounded-full shadow-sm hover:bg-blue-700 transition-all text-[11px] font-medium"
+                                    className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg shadow-sm hover:bg-blue-700 transition-all text-xs font-semibold"
                                 >
                                     <Plus className="w-3.5 h-3.5" />
                                     New
@@ -210,7 +203,7 @@ export const DriveToolbar: React.FC<DriveToolbarProps> = ({
                                         </button>
                                         <button
                                             onClick={() => fileInputRef.current?.click()}
-                                            className="w-full text-left px-4 py-3 hover:bg-slate-50 text-sm font-medium text-slate-700 flex items-center gap-3"
+                                            className="w-full text-left px-4 py-3 hover:bg-slate-50 text-sm font-medium text-slate-700 flex items-center gap-3 border-b border-slate-50"
                                         >
                                             <Upload className="w-4 h-4 text-blue-500" />
                                             Upload Files

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { FolderOpen, Trash2, Cloud, Settings, LogOut, FolderPlus } from 'lucide-react';
+import { FolderOpen, Trash2, Cloud, Settings, LogOut, FolderPlus, Menu, X } from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
 import Image from 'next/image';
 
@@ -25,6 +25,7 @@ export function Sidebar() {
     const { isAdmin, userEmail, signOut } = useAuth();
     const { projects, projectsLoading } = useActionContext();
     const [isSignOutModalOpen, setIsSignOutModalOpen] = useState(false);
+    const [isMobileOpen, setIsMobileOpen] = useState(false);
 
     const navItems = [
         { icon: FolderOpen, label: 'My Files', path: '/drive' },
@@ -32,13 +33,20 @@ export function Sidebar() {
         ...(isAdmin ? [{ icon: Settings, label: 'Whitelist', path: '/admin/whitelist' }] : [])
     ];
 
-    return (
-        <div className="w-64 bg-white border-r border-slate-200 h-screen flex flex-col fixed left-0 top-0 z-20 hidden md:flex">
+    const SidebarContent = () => (
+        <>
             {/* App Logo */}
-            <div className="h-24 flex items-center justify-center border-b border-slate-100">
+            <div className="h-24 flex items-center justify-between px-4 border-b border-slate-100">
                 <div className="flex items-center text-blue-600">
-                    <Image src="/ICAPS.png" alt="ICAPS Logo" width={128} height={128} className="w-32 h-auto object-contain" />
+                    <Image src="/ICAPS.png" alt="ICAPS Logo" width={128} height={128} className="w-28 h-auto object-contain" />
                 </div>
+                {/* Close button for mobile drawer */}
+                <button
+                    onClick={() => setIsMobileOpen(false)}
+                    className="md:hidden p-2 rounded-xl text-slate-400 hover:bg-slate-100 transition-colors"
+                >
+                    <X className="w-5 h-5" />
+                </button>
             </div>
 
             {/* Nav Items */}
@@ -46,7 +54,7 @@ export function Sidebar() {
                 {navItems.map((item) => (
                     <button
                         key={item.label}
-                        onClick={() => router.push(item.path)}
+                        onClick={() => { router.push(item.path); setIsMobileOpen(false); }}
                         className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${(pathname === item.path || (item.path !== '/' && pathname.startsWith(item.path)))
                             ? 'bg-blue-50 text-blue-700'
                             : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
@@ -65,7 +73,6 @@ export function Sidebar() {
                         Projects
                     </div>
                     <div className="space-y-1">
-                        {/* We use projects.length === 0 as loading indicator if we don't have cache yet */}
                         {projects.length === 0 && projectsLoading ? (
                             <div className="px-3 py-2 space-y-2">
                                 <div className="h-8 bg-slate-50 rounded-lg animate-pulse" />
@@ -78,7 +85,7 @@ export function Sidebar() {
                                 return (
                                     <button
                                         key={project.id}
-                                        onClick={() => router.push(`/drive/${project.id}`)}
+                                        onClick={() => { router.push(`/drive/${project.id}`); setIsMobileOpen(false); }}
                                         className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${isActive
                                             ? 'bg-blue-50 text-blue-700 font-semibold'
                                             : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
@@ -145,6 +152,71 @@ export function Sidebar() {
                     </p>
                 </div>
             </div>
+        </>
+    );
+
+    return (
+        <>
+            {/* ── Desktop Sidebar (hidden on mobile) ── */}
+            <div className="w-64 bg-white border-r border-slate-200 h-screen flex flex-col fixed left-0 top-0 z-20 hidden md:flex">
+                <SidebarContent />
+            </div>
+
+            {/* ── Mobile: Top bar ── */}
+            <div className="md:hidden fixed top-0 left-0 right-0 z-30 bg-white border-b border-slate-200 h-14 flex items-center px-4 gap-3">
+                <button
+                    onClick={() => setIsMobileOpen(true)}
+                    className="p-2 rounded-xl text-slate-600 hover:bg-slate-100 transition-colors"
+                    aria-label="Open menu"
+                >
+                    <Menu className="w-5 h-5" />
+                </button>
+                <Image src="/ICAPS.png" alt="ICAPS Logo" width={80} height={32} className="h-8 w-auto object-contain" />
+            </div>
+
+            {/* ── Mobile: Slide-in drawer overlay ── */}
+            {isMobileOpen && (
+                <div
+                    className="md:hidden fixed inset-0 z-40 flex"
+                    onClick={() => setIsMobileOpen(false)}
+                >
+                    {/* Scrim */}
+                    <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" />
+
+                    {/* Drawer panel */}
+                    <div
+                        className="relative w-72 max-w-[85vw] bg-white h-full flex flex-col shadow-2xl animate-in slide-in-from-left duration-200"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <SidebarContent />
+                    </div>
+                </div>
+            )}
+
+            {/* ── Mobile: Bottom nav bar ── */}
+            <div className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-slate-200 flex items-stretch safe-bottom">
+                {navItems.slice(0, 3).map((item) => {
+                    const isActive = pathname === item.path || (item.path !== '/' && pathname.startsWith(item.path));
+                    return (
+                        <button
+                            key={item.label}
+                            onClick={() => router.push(item.path)}
+                            className={`flex-1 flex flex-col items-center justify-center gap-1 py-2 text-[10px] font-medium transition-colors ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
+                        >
+                            <item.icon className={`w-5 h-5 ${isActive ? 'text-blue-600' : 'text-slate-400'}`} />
+                            {item.label}
+                        </button>
+                    );
+                })}
+                {/* Quick projects access */}
+                <button
+                    onClick={() => setIsMobileOpen(true)}
+                    className="flex-1 flex flex-col items-center justify-center gap-1 py-2 text-[10px] font-medium text-slate-400"
+                >
+                    <FolderPlus className="w-5 h-5" />
+                    Projects
+                </button>
+            </div>
 
             {/* Sign Out Confirmation Modal */}
             {isSignOutModalOpen && (
@@ -180,6 +252,6 @@ export function Sidebar() {
                     </div>
                 </div>
             )}
-        </div>
+        </>
     );
 }

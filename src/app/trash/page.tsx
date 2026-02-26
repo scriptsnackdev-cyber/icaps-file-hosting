@@ -159,9 +159,9 @@ export default function TrashPage() {
     };
 
     return (
-        <div className="flex h-screen bg-slate-50">
+        <div className="flex min-h-screen bg-slate-50">
             <Sidebar />
-            <div className="flex-1 flex flex-col min-w-0 overflow-hidden ml-64">
+            <div className="flex-1 flex flex-col min-w-0 overflow-hidden ml-0 md:ml-64 pt-14 md:pt-0 pb-16 md:pb-0">
 
                 {/* Header */}
                 <header className="bg-white border-b border-slate-200 px-8 py-5 flex items-center justify-between">
