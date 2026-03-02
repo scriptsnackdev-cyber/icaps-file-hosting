@@ -22,33 +22,52 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [loading, setLoading] = useState(true);
 
     const checkAuth = useCallback(async () => {
-        const supabase = createClient();
-        const { data: { user } } = await supabase.auth.getUser();
+        try {
+            const supabase = createClient();
+            const { data: { user }, error: authError } = await supabase.auth.getUser();
 
-        if (user) {
+            if (authError || !user) {
+                setIsAdmin(false);
+                setUserEmail(null);
+                setUserId(null);
+                localStorage.removeItem(CACHE_KEYS.AUTH_ADMIN);
+                localStorage.removeItem(CACHE_KEYS.AUTH_EMAIL);
+                localStorage.removeItem(CACHE_KEYS.AUTH_ID);
+                setLoading(false);
+                return;
+            }
+
             setUserEmail(user.email || null);
             setUserId(user.id);
             localStorage.setItem(CACHE_KEYS.AUTH_EMAIL, user.email || '');
             localStorage.setItem(CACHE_KEYS.AUTH_ID, user.id);
 
-            const { data } = await supabase
-                .from('whitelist')
-                .select('role')
-                .eq('email', user.email)
-                .single();
+            try {
+                const { data, error } = await supabase
+                    .from('whitelist')
+                    .select('role')
+                    .eq('email', user.email)
+                    .maybeSingle();
 
-            const adminStatus = data?.role === 'admin';
-            setIsAdmin(adminStatus);
-            localStorage.setItem(CACHE_KEYS.AUTH_ADMIN, adminStatus.toString());
-        } else {
-            setIsAdmin(false);
-            setUserEmail(null);
-            setUserId(null);
-            localStorage.removeItem(CACHE_KEYS.AUTH_ADMIN);
-            localStorage.removeItem(CACHE_KEYS.AUTH_EMAIL);
-            localStorage.removeItem(CACHE_KEYS.AUTH_ID);
+                if (error) {
+                    console.warn('[AuthContext] Error fetching whitelist:', error.message);
+                }
+
+                const adminStatus = data?.role === 'admin';
+                setIsAdmin(adminStatus);
+                localStorage.setItem(CACHE_KEYS.AUTH_ADMIN, adminStatus.toString());
+            } catch (err) {
+                console.warn('[AuthContext] Failed to query whitelist:', err);
+                setIsAdmin(false);
+                localStorage.setItem(CACHE_KEYS.AUTH_ADMIN, 'false');
+            }
+        } catch (error) {
+            console.error('[AuthContext] Unexpected error during checkAuth:', error);
+            // Don't necessarily clear user if it's a transient network error, 
+            // but we ensure loading is set to false.
+        } finally {
+            setLoading(false);
         }
-        setLoading(false);
     }, []);
 
     useEffect(() => {
