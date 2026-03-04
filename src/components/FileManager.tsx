@@ -37,6 +37,9 @@ export default function FileManager() {
     const router = useRouter();
     const { showToast, showConfirm } = useToast();
     const initialLoadDone = useRef(false);
+    const lastUrlState = useRef<{ projectId: string | null, folderId: string | null, search: string | null, recent: boolean }>({
+        projectId: undefined as any, folderId: undefined as any, search: undefined as any, recent: undefined as any
+    });
 
     const [contextMenu, setContextMenu] = useState<{ x: number, y: number, node: DriveNode } | null>(null);
 
@@ -110,9 +113,30 @@ export default function FileManager() {
 
     useEffect(() => {
         const initFromUrl = async () => {
-            const folderId = searchParams?.get('folderId');
-            const searchQ = searchParams?.get('search') || undefined;
+            const folderId = searchParams?.get('folderId') || null;
+            const searchQ = searchParams?.get('search') || null;
             const isRecent = searchParams?.get('recent') === 'true';
+            const projectId = searchParams?.get('projectId') || null;
+
+            const isProjectChanged = lastUrlState.current.projectId !== projectId;
+            const isFolderChanged = lastUrlState.current.folderId !== folderId;
+            const isSearchChanged = lastUrlState.current.search !== searchQ;
+            const isRecentChanged = lastUrlState.current.recent !== isRecent;
+
+            if (!isProjectChanged && !isFolderChanged && !isSearchChanged && !isRecentChanged && initialLoadDone.current) {
+                return;
+            }
+            lastUrlState.current = { projectId, folderId, search: searchQ, recent: isRecent };
+
+            if (isProjectChanged || !initialLoadDone.current) {
+                if (projectId) {
+                    fetchProject(projectId).then(proj => { if (proj) setProjectName(proj.name); });
+                    getMyRoleInProject(projectId).then(role => setProjectRole(role as 'admin' | 'member' | 'read_only'));
+                } else {
+                    setProjectName('Workspace');
+                    setProjectRole('read_only');
+                }
+            }
 
             if (isRecent) {
                 setFolderHistory([]);
@@ -131,20 +155,7 @@ export default function FileManager() {
             }
 
             initialLoadDone.current = true;
-
-            const pId = searchParams?.get('projectId');
-            if (pId) {
-                const proj = await fetchProject(pId);
-                if (proj) setProjectName(proj.name);
-            } else {
-                setProjectName('Workspace');
-            }
-
-            // Check project role permissions
-            const role = await getMyRoleInProject(pId);
-            setProjectRole(role as 'admin' | 'member' | 'read_only');
-
-            loadData(isRecent ? null : folderId || null, searchQ, isRecent);
+            loadData(isRecent ? null : folderId, searchQ || undefined, isRecent);
         };
         initFromUrl();
     }, [searchParams]);
@@ -402,10 +413,15 @@ export default function FileManager() {
 
     const navigateToFolder = (node: DriveNode) => {
         if (node.type !== 'folder') return;
-        const projectId = searchParams?.get('projectId');
+        const projectId = searchParams?.get('projectId') || null;
         setFolderHistory(prev => [...prev, currentFolder]);
         setCurrentFolder({ id: node.id, name: node.name });
-        router.push(`/?folderId=${node.id}${projectId ? `&projectId=${projectId}` : ''}`);
+
+        loadData(node.id, undefined, false);
+        lastUrlState.current = { projectId, folderId: node.id, search: null, recent: false };
+
+        const newUrl = `/?folderId=${node.id}${projectId ? `&projectId=${projectId}` : ''}`;
+        window.history.pushState(null, '', newUrl);
     };
 
     const goBack = () => {
@@ -413,9 +429,13 @@ export default function FileManager() {
         if (!prev) return;
         setFolderHistory([...folderHistory]);
         setCurrentFolder(prev);
-        const projectId = searchParams?.get('projectId');
-        if (prev.id) router.push(`/?folderId=${prev.id}${projectId ? `&projectId=${projectId}` : ''}`);
-        else router.push(`/${projectId ? `?projectId=${projectId}` : ''}`);
+
+        const projectId = searchParams?.get('projectId') || null;
+        loadData(prev.id || null, undefined, false);
+        lastUrlState.current = { projectId, folderId: prev.id, search: null, recent: false };
+
+        const newUrl = prev.id ? `/?folderId=${prev.id}${projectId ? `&projectId=${projectId}` : ''}` : `/${projectId ? `?projectId=${projectId}` : ''}`;
+        window.history.pushState(null, '', newUrl);
     };
 
     const handleDownload = async (e: React.MouseEvent, node: DriveNode) => {
@@ -577,10 +597,15 @@ export default function FileManager() {
                             )}
                             {/* Root / Project name */}
                             <span className={styles.breadcrumbCrumb} onClick={() => {
-                                const projectId = searchParams?.get('projectId');
+                                const projectId = searchParams?.get('projectId') || null;
                                 setCurrentFolder({ id: null, name: 'Root' });
                                 setFolderHistory([]);
-                                router.push(projectId ? `/?projectId=${projectId}` : '/');
+
+                                loadData(null, undefined, false);
+                                lastUrlState.current = { projectId, folderId: null, search: null, recent: false };
+
+                                const newUrl = projectId ? `/?projectId=${projectId}` : '/';
+                                window.history.pushState(null, '', newUrl);
                             }}>
                                 {projectName}
                             </span>
@@ -597,11 +622,13 @@ export default function FileManager() {
                                             onClick={() => {
                                                 setFolderHistory(newHistory);
                                                 setCurrentFolder(ancestor);
-                                                if (ancestor.id) {
-                                                    router.push(`/?folderId=${ancestor.id}${projectId ? `&projectId=${projectId}` : ''}`);
-                                                } else {
-                                                    router.push(projectId ? `/?projectId=${projectId}` : '/');
-                                                }
+                                                const pId = projectId || null;
+
+                                                loadData(ancestor.id || null, undefined, false);
+                                                lastUrlState.current = { projectId: pId, folderId: ancestor.id, search: null, recent: false };
+
+                                                const newUrl = ancestor.id ? `/?folderId=${ancestor.id}${pId ? `&projectId=${pId}` : ''}` : `/${pId ? `?projectId=${pId}` : ''}`;
+                                                window.history.pushState(null, '', newUrl);
                                             }}
                                         >
                                             {ancestor.name}
