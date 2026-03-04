@@ -1,13 +1,10 @@
-import { redirect } from 'next/navigation';
-import { createClient } from '@/utils/supabase/server';
+import FileManager from '@/components/FileManager';
+import { Suspense } from 'react';
 
-export default async function Home() {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-
-  if (user) {
-    redirect('/drive');
-  } else {
-    redirect('/login');
-  }
+export default function Home() {
+  return (
+    <Suspense fallback={<div style={{ padding: '24px' }}>Loading workspace...</div>}>
+      <FileManager />
+    </Suspense>
+  );
 }

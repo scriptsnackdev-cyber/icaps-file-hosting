@@ -1,5 +1,5 @@
 {
-  "name": "icaps-file-hosting",
+  "name": "sharepoint-app",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -9,31 +9,25 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.978.0",
-    "@aws-sdk/s3-request-presigner": "^3.978.0",
-    "@supabase/ssr": "^0.8.0",
-    "@supabase/supabase-js": "^2.93.1",
+    "@aws-sdk/client-s3": "^3.1001.0",
+    "@aws-sdk/s3-request-presigner": "^3.1001.0",
+    "@supabase/ssr": "^0.9.0",
+    "@supabase/supabase-js": "^2.98.0",
+    "@types/archiver": "^7.0.0",
+    "@types/bcryptjs": "^2.4.6",
     "archiver": "^7.0.1",
-    "date-fns": "^4.1.0",
-    "framer-motion": "^12.31.2",
-    "lucide-react": "^0.563.0",
-    "next": "16.1.5",
-    "nextjs-toploader": "^3.9.17",
+    "bcryptjs": "^3.0.3",
+    "lucide-react": "^0.576.0",
+    "next": "16.1.6",
     "react": "19.2.3",
-    "react-dom": "19.2.3",
-    "resend": "^6.9.1",
-    "undici": "^7.22.0",
-    "uuid": "^13.0.0"
+    "react-dom": "19.2.3"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/archiver": "^7.0.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.1.5",
-    "tailwindcss": "^4",
+    "eslint-config-next": "16.1.6",
     "typescript": "^5"
   }
 }

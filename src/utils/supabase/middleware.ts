@@ -6,6 +6,15 @@ export async function updateSession(request: NextRequest) {
         request,
     })
 
+    // Skip middleware entirely for static files and non-page requests
+    if (
+        request.nextUrl.pathname.startsWith('/_next') ||
+        request.nextUrl.pathname.includes('.') ||
+        request.nextUrl.pathname.startsWith('/api')
+    ) {
+        return supabaseResponse
+    }
+
     const supabase = createServerClient(
         process.env.NEXT_PUBLIC_SUPABASE_URL!,
         process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -15,9 +24,7 @@ export async function updateSession(request: NextRequest) {
                     return request.cookies.getAll()
                 },
                 setAll(cookiesToSet) {
-                    cookiesToSet.forEach(({ name, value, options }) =>
-                        request.cookies.set(name, value)
-                    )
+                    cookiesToSet.forEach(({ name, value, options }) => request.cookies.set(name, value))
                     supabaseResponse = NextResponse.next({
                         request,
                     })
@@ -33,17 +40,23 @@ export async function updateSession(request: NextRequest) {
         data: { user },
     } = await supabase.auth.getUser()
 
-    // EXCLUSIONS: Add paths that do NOT require authentication here
+    const isAuthRoute = request.nextUrl.pathname.startsWith('/login') || request.nextUrl.pathname.startsWith('/auth')
+    const isPublicShareRoute = request.nextUrl.pathname.startsWith('/s/')
+
     if (
         !user &&
-        !request.nextUrl.pathname.startsWith('/login') &&
-        !request.nextUrl.pathname.startsWith('/auth') &&
-        !request.nextUrl.pathname.startsWith('/share') && // Allow shared links
-        !request.nextUrl.pathname.startsWith('/api') // Allow API calls to handle their own auth (returns 401 instead of redirect)
+        !isAuthRoute &&
+        !isPublicShareRoute
     ) {
+        // no user, potentially respond by redirecting the user to the login page
         const url = request.nextUrl.clone()
         url.pathname = '/login'
-        url.searchParams.set('next', request.nextUrl.pathname)
+        return NextResponse.redirect(url)
+    }
+
+    if (user && isAuthRoute && !request.nextUrl.pathname.startsWith('/auth/confirm')) {
+        const url = request.nextUrl.clone()
+        url.pathname = '/'
         return NextResponse.redirect(url)
     }
 
