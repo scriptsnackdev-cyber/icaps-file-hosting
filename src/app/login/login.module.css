@@ -1,125 +1,307 @@
+/* ============================================================
+   Login Page — Premium dark glassmorphism
+   ============================================================ */
+
 .container {
     display: flex;
     align-items: center;
     justify-content: center;
     min-height: 100vh;
-    background: radial-gradient(circle at top left, var(--secondary-color), var(--bg-color));
-    padding: 20px;
+    background: var(--bg-base);
+    padding: 24px;
+    position: relative;
+    overflow: hidden;
 }
 
+/* Ambient glow orbs */
+.container::before,
+.container::after {
+    content: '';
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(120px);
+    pointer-events: none;
+    z-index: 0;
+}
+
+.container::before {
+    width: 500px;
+    height: 500px;
+    background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, transparent 70%);
+    top: -100px;
+    left: -100px;
+}
+
+.container::after {
+    width: 400px;
+    height: 400px;
+    background: radial-gradient(circle, rgba(139, 92, 246, 0.12) 0%, transparent 70%);
+    bottom: -80px;
+    right: -80px;
+}
+
+/* ── Card ── */
 .card {
     width: 100%;
-    max-width: 440px;
-    padding: 40px;
-    border-radius: var(--radius-lg);
-    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
-    border: 1px solid var(--border-color);
-    animation: slideUp 0.4s ease-out;
+    max-width: 420px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-mid);
+    border-radius: var(--r-xl);
+    box-shadow: 0 32px 80px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(139, 92, 246, 0.08);
+    padding: 44px 40px;
+    position: relative;
+    z-index: 1;
+    animation: cardIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
+@keyframes cardIn {
+    from {
+        opacity: 0;
+        transform: translateY(24px) scale(0.97);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+/* Top accent bar */
+.card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 24px;
+    right: 24px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(139, 92, 246, 0.6), transparent);
+}
+
+/* ── Header ── */
 .header {
     display: flex;
     flex-direction: column;
     align-items: center;
     text-align: center;
-    margin-bottom: 32px;
+    margin-bottom: 36px;
+    gap: 4px;
+}
+
+.logoRing {
+    width: 68px;
+    height: 68px;
+    border-radius: var(--r-xl);
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(139, 92, 246, 0.2));
+    border: 1px solid rgba(139, 92, 246, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 20px;
+    box-shadow: 0 0 32px rgba(99, 102, 241, 0.2);
 }
 
 .title {
-    font-size: 1.75rem;
-    font-weight: 700;
-    color: var(--text-dark);
-    margin-top: 16px;
+    font-size: 1.6rem;
+    font-weight: 800;
+    color: var(--text-primary);
+    letter-spacing: -0.03em;
     margin-bottom: 8px;
 }
 
-.subtitle {
-    color: var(--text-light);
-    font-size: 0.95rem;
-    line-height: 1.5;
+.title span {
+    background: linear-gradient(135deg, var(--brand-start), var(--brand-end));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
 }
 
+.subtitle {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    line-height: 1.6;
+    max-width: 300px;
+}
+
+/* ── Step indicator ── */
+.stepBadge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: var(--r-full);
+    background: rgba(99, 102, 241, 0.12);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--brand-end);
+    margin-bottom: 20px;
+    letter-spacing: 0.04em;
+}
+
+/* ── OTP Email target ── */
+.emailTarget {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--r-md);
+    padding: 10px 14px;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 20px;
+    font-weight: 500;
+}
+
+.emailTarget span {
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+}
+
+/* ── Form ── */
 .form {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 16px;
+}
+
+/* ── Input ── */
+.inputWrapper {
+    position: relative;
+}
+
+.inputIcon {
+    position: absolute;
+    left: 14px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-muted);
+    pointer-events: none;
+    display: flex;
+    align-items: center;
 }
 
 .input {
     width: 100%;
-    padding: 14px 16px;
-    border-radius: var(--radius-md);
-    border: 1px solid var(--border-color);
-    background: var(--surface-color);
-    color: var(--text-dark);
-    font-size: 1rem;
+    padding: 12px 14px 12px 42px;
+    border-radius: var(--r-md);
+    border: 1px solid var(--border-mid);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    font-size: 0.925rem;
+    font-family: var(--font);
     transition: all 0.2s;
+}
+
+.input::placeholder {
+    color: var(--text-muted);
 }
 
 .input:focus {
     outline: none;
-    border-color: var(--primary-color);
-    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
+    border-color: var(--border-focus);
+    background: var(--bg-overlay);
+    box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.12);
 }
 
+/* OTP input special style */
+.inputOtp {
+    letter-spacing: 0.3em;
+    font-size: 1.4rem;
+    font-weight: 700;
+    text-align: center;
+    padding-left: 14px;
+}
+
+/* ── Primary Button ── */
 .primaryBtn {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 12px;
-    background: linear-gradient(135deg, var(--primary-color), #8b5cf6);
+    gap: 10px;
+    background: linear-gradient(135deg, var(--brand-start), var(--brand-mid));
     color: white;
-    padding: 14px;
-    border-radius: var(--radius-md);
-    font-weight: 600;
-    font-size: 1rem;
-    transition: all 0.2s;
+    padding: 13px;
+    border-radius: var(--r-md);
+    font-weight: 700;
+    font-size: 0.95rem;
+    font-family: var(--font);
+    letter-spacing: 0.01em;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     cursor: pointer;
     border: none;
     width: 100%;
+    box-shadow: 0 6px 20px rgba(99, 102, 241, 0.35);
 }
 
 .primaryBtn:hover:not(:disabled) {
     transform: translateY(-2px);
-    box-shadow: 0 8px 20px rgba(37, 99, 235, 0.3);
+    box-shadow: 0 10px 28px rgba(99, 102, 241, 0.5);
+    filter: brightness(1.06);
+}
+
+.primaryBtn:active:not(:disabled) {
+    transform: translateY(0);
 }
 
 .primaryBtn:disabled {
-    opacity: 0.7;
+    opacity: 0.55;
     cursor: not-allowed;
+    box-shadow: none;
+    transform: none;
 }
 
+/* Spinner inside button */
+.spinner {
+    width: 18px;
+    height: 18px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* ── Text button ── */
 .textBtn {
     background: transparent;
-    color: var(--text-light);
+    color: var(--text-secondary);
     border: none;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
+    font-family: var(--font);
     cursor: pointer;
-    margin-top: 8px;
+    text-align: center;
     transition: color 0.2s;
+    padding: 4px;
+    font-weight: 500;
 }
 
 .textBtn:hover {
-    color: var(--primary-color);
-    text-decoration: underline;
+    color: var(--brand-end);
 }
 
+/* ── Error Banner ── */
 .errorBanner {
-    background: #fee2e2;
-    color: #b91c1c;
-    padding: 12px 16px;
-    border-radius: var(--radius-md);
-    margin-bottom: 24px;
-    font-size: 0.9rem;
-    border: 1px solid #fca5a5;
+    background: var(--error-bg);
+    color: var(--error-text);
+    padding: 11px 16px;
+    border-radius: var(--r-md);
+    font-size: 0.875rem;
+    border: 1px solid var(--error-border);
     text-align: center;
-    animation: fadeIn 0.3s;
+    animation: fadeIn 0.3s ease-out;
+    font-weight: 500;
 }
 
-@keyframes slideUp {
+@keyframes fadeIn {
     from {
         opacity: 0;
-        transform: translateY(20px);
+        transform: translateY(-6px);
     }
 
     to {
@@ -128,20 +310,18 @@
     }
 }
 
-@keyframes fadeIn {
-    from {
-        opacity: 0;
-    }
-
-    to {
-        opacity: 1;
-    }
+/* ── Footer ── */
+.footer {
+    margin-top: 32px;
+    text-align: center;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    padding-top: 20px;
+    border-top: 1px solid var(--border-soft);
+    letter-spacing: 0.01em;
 }
 
-@media (prefers-color-scheme: dark) {
-    .errorBanner {
-        background: rgba(239, 68, 68, 0.1);
-        border-color: rgba(239, 68, 68, 0.3);
-        color: #fca5a5;
-    }
+.footer strong {
+    color: var(--brand-end);
+    font-weight: 600;
 }

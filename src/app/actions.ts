@@ -8,6 +8,34 @@ import bcrypt from 'bcryptjs';
 import { createClient, createServiceClient } from '@/utils/supabase/server';
 import { revalidatePath } from 'next/cache';
 
+// =======================
+// ACTIVITY LOGGING (internal helper)
+// =======================
+
+async function logActivity(params: {
+    projectId: string | null | undefined;
+    userEmail: string;
+    action: string;
+    nodeId?: string | null;
+    nodeName: string;
+    metadata?: Record<string, unknown>;
+}) {
+    if (!hasValidSupabaseEnv || !params.projectId) return;
+    try {
+        // Use service client so logging never fails due to RLS
+        await createServiceClient().from('share_log').insert({
+            project_id: params.projectId,
+            user_email: params.userEmail,
+            action: params.action,
+            node_id: params.nodeId ?? null,
+            node_name: params.nodeName,
+            metadata: params.metadata ?? null,
+        });
+    } catch (_) {
+        // Logging is a side-effect — never break the main operation
+    }
+}
+
 export type ShareLink = {
     id: string;
     node_id: string;
@@ -127,14 +155,20 @@ export async function getNodePath(nodeId: string | null): Promise<string> {
 export async function createFolderFolder(name: string, parentId: string | null = null, projectId?: string) {
     if (!hasValidSupabaseEnv) return { success: true };
     const supabaseServer = await createClient();
-    const { error } = await supabaseServer.from('share_nodes').insert([{
+    const { data: inserted, error } = await supabaseServer.from('share_nodes').insert([{
         name,
         type: 'folder',
         parent_id: parentId,
         project_id: projectId || null
-    }]);
+    }]).select('id').single();
 
     if (error) throw new Error(error.message);
+
+    const { data: { user } } = await supabaseServer.auth.getUser();
+    if (user?.email) {
+        await logActivity({ projectId, userEmail: user.email, action: 'folder_create', nodeId: inserted?.id, nodeName: name });
+    }
+
     revalidatePath('/');
     return { success: true };
 }
@@ -232,7 +266,7 @@ export async function saveFileRecord(
     if (!hasValidSupabaseEnv) return { success: true };
 
     const supabaseServer = await createClient();
-    const { error } = await supabaseServer.from('share_nodes').insert([{
+    const { data: inserted, error } = await supabaseServer.from('share_nodes').insert([{
         name,
         type: 'file',
         r2_key,
@@ -240,11 +274,27 @@ export async function saveFileRecord(
         mime_type,
         parent_id: parentId,
         project_id: projectId || null
-    }]);
+    }]).select('id').single();
 
     if (error) throw new Error(error.message);
+
+    const { data: { user } } = await supabaseServer.auth.getUser();
+    if (user?.email) {
+        await logActivity({ projectId, userEmail: user.email, action: 'upload', nodeId: inserted?.id, nodeName: name, metadata: { size, mime_type } });
+    }
+
     revalidatePath('/');
     return { success: true };
+}
+
+// Called from client after a successful download
+export async function logDownload(nodeId: string, nodeName: string, projectId: string | null) {
+    if (!hasValidSupabaseEnv || !projectId) return;
+    const supabaseServer = await createClient();
+    const { data: { user } } = await supabaseServer.auth.getUser();
+    if (user?.email) {
+        await logActivity({ projectId, userEmail: user.email, action: 'download', nodeId, nodeName });
+    }
 }
 
 export async function getDownloadUrl(r2_key: string, fileName: string) {
@@ -262,8 +312,29 @@ export async function getDownloadUrl(r2_key: string, fileName: string) {
     return url;
 }
 
+export async function getPreviewUrl(r2_key: string, mimeType: string) {
+    if (!hasValidR2Env) {
+        return 'https://example.com/mock-preview';
+    }
+
+    const command = new GetObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: r2_key,
+        ResponseContentType: mimeType, // ensure the browser renders it correctly
+        ResponseContentDisposition: 'inline'
+    });
+
+    const url = await getSignedUrl(r2Client, command, { expiresIn: 3600 });
+    return url;
+}
+
 export async function deleteNode(id: string, r2_key: string | null = null) {
     if (!hasValidSupabaseEnv) return { success: true };
+
+    const supabaseServer = await createClient();
+
+    // Fetch node info before deletion for logging
+    const { data: nodeInfo } = await supabaseServer.from('share_nodes').select('name, project_id').eq('id', id).single();
 
     // If it's a file, delete from R2 first
     if (r2_key && hasValidR2Env) {
@@ -274,20 +345,36 @@ export async function deleteNode(id: string, r2_key: string | null = null) {
             }));
         } catch (e) {
             console.error('Failed to delete from R2', e);
-            // Proceeding with DB delete anyway
         }
     }
 
-    const { error } = await (await createClient()).from('share_nodes').delete().eq('id', id);
+    const { error } = await supabaseServer.from('share_nodes').delete().eq('id', id);
     if (error) throw new Error(error.message);
+
+    const { data: { user } } = await supabaseServer.auth.getUser();
+    if (user?.email && nodeInfo) {
+        await logActivity({ projectId: nodeInfo.project_id, userEmail: user.email, action: 'delete', nodeId: id, nodeName: nodeInfo.name });
+    }
+
     revalidatePath('/');
     return { success: true };
 }
 
 export async function renameNode(id: string, newName: string) {
     if (!hasValidSupabaseEnv) return { success: true };
-    const { error } = await (await createClient()).from('share_nodes').update({ name: newName }).eq('id', id);
+    const supabaseServer = await createClient();
+
+    // Fetch old name before rename
+    const { data: oldNode } = await supabaseServer.from('share_nodes').select('name, project_id').eq('id', id).single();
+
+    const { error } = await supabaseServer.from('share_nodes').update({ name: newName }).eq('id', id);
     if (error) throw new Error(error.message);
+
+    const { data: { user } } = await supabaseServer.auth.getUser();
+    if (user?.email && oldNode) {
+        await logActivity({ projectId: oldNode.project_id, userEmail: user.email, action: 'rename', nodeId: id, nodeName: newName, metadata: { old_name: oldNode.name, new_name: newName } });
+    }
+
     revalidatePath('/');
     return { success: true };
 }
@@ -301,8 +388,18 @@ export async function moveNode(nodeId: string, newParentId: string | null) {
         if (isDesc) throw new Error("Cannot move folder into itself or its subfolders");
     }
 
-    const { error } = await (await createClient()).from('share_nodes').update({ parent_id: newParentId }).eq('id', nodeId);
+    const supabaseServer = await createClient();
+    const { data: nodeInfo } = await supabaseServer.from('share_nodes').select('name, project_id').eq('id', nodeId).single();
+
+    const { error } = await supabaseServer.from('share_nodes').update({ parent_id: newParentId }).eq('id', nodeId);
     if (error) throw new Error(error.message);
+
+    const { data: { user } } = await supabaseServer.auth.getUser();
+    if (user?.email && nodeInfo) {
+        const destName = newParentId ? (await supabaseServer.from('share_nodes').select('name').eq('id', newParentId).single()).data?.name : 'Root';
+        await logActivity({ projectId: nodeInfo.project_id, userEmail: user.email, action: 'move', nodeId, nodeName: nodeInfo.name, metadata: { destination: destName ?? 'Root' } });
+    }
+
     revalidatePath('/');
     return { success: true };
 }
@@ -330,6 +427,13 @@ export async function createShareLink(nodeId: string, passwordAttempt?: string, 
     }]).select('id').single();
 
     if (error || !data) throw new Error(error?.message || 'Failed to create link');
+
+    // Log share link creation
+    const { data: nodeInfo } = await supabaseServer.from('share_nodes').select('name, project_id').eq('id', nodeId).single();
+    const { data: { user } } = await supabaseServer.auth.getUser();
+    if (user?.email && nodeInfo) {
+        await logActivity({ projectId: nodeInfo.project_id, userEmail: user.email, action: 'share_create', nodeId, nodeName: nodeInfo.name, metadata: { link_id: data.id } });
+    }
 
     return { success: true, linkId: data.id };
 }
@@ -373,7 +477,7 @@ export async function getShareLinkDetails(linkId: string) {
     // Step 2: Fetch the node using service client (bypasses project RLS for external viewer)
     const { data: nodeData } = await svc
         .from('share_nodes')
-        .select('id, name, size, mime_type, type')
+        .select('id, name, size, mime_type, type, project_id, parent_id')
         .eq('id', linkData.node_id)
         .single();
 
@@ -386,6 +490,9 @@ export async function getShareLinkDetails(linkId: string) {
 
     return {
         id: linkData.id,
+        nodeId: linkData.node_id,
+        projectId: nodeData?.project_id ?? null,
+        parentId: nodeData?.parent_id ?? null,
         requiresPassword: !!linkData.password_hash,
         fileName: nodeData?.name ?? null,
         fileSize,
@@ -509,6 +616,32 @@ export async function getSharedFileDownloadUrlInside(linkId: string, fileId: str
     return { success: true, downloadUrl: url, fileName: node.name };
 }
 
+export async function getSharedFilePreviewUrlInside(linkId: string, fileId: string, passwordAttempt?: string) {
+    if (!hasValidSupabaseEnv) return { error: 'Not connected' };
+
+    const svc = createServiceClient();
+
+    const { data: link, error: linkError } = await svc.from('share_links').select('password_hash, node_id, expires_at').eq('id', linkId).single();
+    if (linkError || !link) return { error: 'Invalid link' };
+
+    if (link.expires_at && new Date(link.expires_at) < new Date()) return { error: 'Link expired' };
+
+    if (link.password_hash) {
+        if (!passwordAttempt) return { error: 'Password required' };
+        const isMatch = await bcrypt.compare(passwordAttempt, link.password_hash);
+        if (!isMatch) return { error: 'Incorrect password' };
+    }
+
+    const valid = await isDescendant(fileId, link.node_id);
+    if (!valid) return { error: 'Access denied' };
+
+    const { data: node, error } = await svc.from('share_nodes').select('*').eq('id', fileId).single();
+    if (error || !node || !node.r2_key) return { error: 'File not found' };
+
+    const url = await getPreviewUrl(node.r2_key, node.mime_type || 'application/octet-stream');
+    return { success: true, previewUrl: url };
+}
+
 // =======================
 // PROJECTS & MEMBERS
 // =======================
@@ -546,6 +679,60 @@ export async function fetchUserProjects(): Promise<{ id: string; name: string; u
         userRole: (roleMap.get(p.id) as string | null) ?? null
     }));
 }
+
+export async function fetchUserProjectsWithUsage(): Promise<{
+    id: string;
+    name: string;
+    userRole: string | null;
+    totalBytes: number;
+}[]> {
+    if (!hasValidSupabaseEnv) return [{
+        id: 'mock', name: 'Mock Project', userRole: 'admin', totalBytes: 123456789
+    }];
+    const supabaseServer = await createClient();
+    const { data: { user } } = await supabaseServer.auth.getUser();
+    if (!user) return [];
+
+    const [projectsRes, membersRes] = await Promise.all([
+        supabaseServer.from('share_projects').select('id, name').order('name'),
+        user.email
+            ? supabaseServer.from('share_project_members').select('project_id, role').eq('email', user.email)
+            : Promise.resolve({ data: [] as { project_id: string; role: string }[] })
+    ]);
+
+    if (projectsRes.error) {
+        console.error('Error fetching projects:', projectsRes.error);
+        return [];
+    }
+
+    const projects = projectsRes.data || [];
+    const roleMap = new Map((membersRes.data || []).map((m: { project_id: string; role: string }) => [m.project_id, m.role]));
+
+    // Only fetch usage for projects the user is a member of
+    const myProjectIds = projects
+        .filter(p => roleMap.has(p.id))
+        .map(p => p.id);
+
+    let usageMap = new Map<string, number>();
+    if (myProjectIds.length > 0) {
+        const { data: usageData, error: usageError } = await supabaseServer.rpc('get_project_usages', {
+            p_project_ids: myProjectIds,
+        });
+        if (!usageError && usageData) {
+            for (const row of usageData as { project_id: string; total_bytes: number }[]) {
+                usageMap.set(row.project_id, Number(row.total_bytes));
+            }
+        }
+    }
+
+    return projects.map(p => ({
+        id: p.id,
+        name: p.name,
+        userRole: (roleMap.get(p.id) as string | null) ?? null,
+        totalBytes: usageMap.get(p.id) ?? 0,
+    }));
+}
+
 
 export async function fetchProject(projectId: string) {
     if (!hasValidSupabaseEnv) return { id: 'mock', name: 'Mock Project' };
@@ -668,4 +855,34 @@ export async function getMyRoleInProject(projectId: string | null) {
 
     const { data } = await (await createClient()).from('share_project_members').select('role').eq('project_id', projectId).eq('email', user.email).single();
     return data?.role || 'read_only';
+}
+
+// =======================
+// ACTIVITY LOG
+// =======================
+
+export type ActivityLog = {
+    id: string;
+    user_email: string;
+    action: string;
+    node_id: string | null;
+    node_name: string;
+    metadata: Record<string, unknown> | null;
+    created_at: string;
+};
+
+export async function fetchProjectLogs(projectId: string): Promise<ActivityLog[]> {
+    if (!hasValidSupabaseEnv) return [];
+    const { data, error } = await (await createClient())
+        .from('share_log')
+        .select('id, user_email, action, node_id, node_name, metadata, created_at')
+        .eq('project_id', projectId)
+        .order('created_at', { ascending: false })
+        .limit(200);
+
+    if (error) {
+        console.error('Error fetching logs:', error);
+        return [];
+    }
+    return (data ?? []) as ActivityLog[];
 }

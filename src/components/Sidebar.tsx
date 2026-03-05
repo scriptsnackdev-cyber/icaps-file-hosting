@@ -1,13 +1,15 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import Image from 'next/image';
 import { useSearchParams, useRouter, usePathname } from 'next/navigation';
-import { Folder, Clock, Trash2, ShieldCheck, Cloud, Plus, X, Pencil, Users, AlertTriangle, UserMinus, UserPlus, ChevronDown } from 'lucide-react';
+import { Folder, Clock, Trash2, ShieldCheck, Cloud, Plus, X, Pencil, Users, AlertTriangle, UserMinus, UserPlus, ChevronDown, ClipboardList } from 'lucide-react';
 import styles from '@/app/layout.module.css';
 import { createProject, renameProject, deleteProject, getProjectMembers, addProjectMember, updateProjectMemberRole, removeProjectMember, getWhitelistUsers } from '@/app/actions';
 import { useToast } from '@/components/Toast';
+import ActivityLogModal from '@/components/ActivityLogModal';
 
 type Project = { id: string; name: string; userRole: string | null };
 type Member = { project_id: string; email: string; role: string; created_at: string };
@@ -49,6 +51,9 @@ export default function Sidebar({
     // ── Delete confirm ──
     const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
     const [isDeleting, setIsDeleting] = useState(false);
+
+    // ── Activity Log ──
+    const [logTarget, setLogTarget] = useState<Project | null>(null);
 
     // ── Access Manage modal ──
     const [manageTarget, setManageTarget] = useState<Project | null>(null);
@@ -191,154 +196,197 @@ export default function Sidebar({
     };
 
     const inputStyle: React.CSSProperties = {
-        width: '100%', padding: '9px 12px', borderRadius: '6px',
-        border: '1px solid var(--border-color)', background: 'var(--bg-color)',
-        color: 'var(--text-dark)', fontSize: '0.9rem', boxSizing: 'border-box'
+        width: '100%', padding: '9px 12px', borderRadius: 'var(--r-md)',
+        border: '1px solid var(--border-mid)', background: 'var(--bg-elevated)',
+        color: 'var(--text-primary)', fontSize: '0.875rem', boxSizing: 'border-box',
+        fontFamily: 'var(--font)', outline: 'none',
+        transition: 'border-color 0.15s, box-shadow 0.15s',
     };
     const btnPrimary: React.CSSProperties = {
-        padding: '9px 18px', borderRadius: '6px', border: 'none',
-        background: 'var(--primary-color)', color: 'white', cursor: 'pointer',
-        fontWeight: 600, fontSize: '0.9rem'
+        padding: '9px 18px', borderRadius: 'var(--r-md)', border: 'none',
+        background: 'linear-gradient(135deg, var(--brand-start), var(--brand-mid))',
+        color: 'white', cursor: 'pointer', fontWeight: 600, fontSize: '0.875rem',
+        fontFamily: 'var(--font)', boxShadow: '0 4px 12px rgba(99,102,241,0.3)',
     };
     const btnGhost: React.CSSProperties = {
-        padding: '9px 18px', borderRadius: '6px',
-        border: '1px solid var(--border-color)', background: 'transparent',
-        color: 'var(--text-dark)', cursor: 'pointer', fontSize: '0.9rem'
+        padding: '9px 18px', borderRadius: 'var(--r-md)',
+        border: '1px solid var(--border-mid)', background: 'transparent',
+        color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '0.875rem', fontFamily: 'var(--font)',
     };
     const overlay: React.CSSProperties = {
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)',
+        backdropFilter: 'blur(8px)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
     };
     const modalCard: React.CSSProperties = {
-        background: 'var(--surface-color)', borderRadius: '14px',
-        boxShadow: '0 20px 60px rgba(0,0,0,0.35)', width: '440px', maxWidth: 'calc(100vw - 32px)'
+        background: 'var(--bg-surface)', borderRadius: 'var(--r-lg)',
+        border: '1px solid var(--border-mid)',
+        boxShadow: '0 24px 64px rgba(0,0,0,0.7)', width: '440px', maxWidth: 'calc(100vw - 32px)'
     };
 
     return (
-        <aside className={styles.sidebar}>
-            <div className={styles.logoArea} style={{ padding: '16px 20px', height: '120px' }}>
-                <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-                    <Image src="/ICAPS.png" alt="ICAPS Clouds Logo" fill sizes="(max-width: 768px) 100vw, 200px" style={{ objectFit: 'contain', objectPosition: 'left' }} priority />
+        <aside style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+            {/* ── Logo ── */}
+            <div className={styles.logoArea}>
+                <div style={{ position: 'relative', width: '100%', height: '150px' }}>
+                    <Image src="/ICAPS.png" alt="ICAPS Clouds Logo" fill sizes="200px" style={{ objectFit: 'contain', objectPosition: 'left' }} priority />
                 </div>
             </div>
+
+            {/* ── Nav ── */}
             <nav className={styles.nav}>
-                <div style={{ padding: '0 16px', marginBottom: '8px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-light)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span>PROJECTS</span>
+                {/* Projects section */}
+                <div style={{ padding: '4px 12px 6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>PROJECTS</span>
                     {role === 'admin' && (
-                        <button onClick={() => setShowNewProject(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary-color)' }}>
-                            <Plus size={16} />
+                        <button
+                            onClick={() => setShowNewProject(true)}
+                            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 22, height: 22, borderRadius: 'var(--r-sm)', background: 'var(--bg-hover)', color: 'var(--text-secondary)', transition: 'all var(--ease-fast)' }}
+                            title="New Project"
+                        >
+                            <Plus size={13} />
                         </button>
                     )}
                 </div>
 
                 {projects.map(p => {
-                    const isActive = projectId === p.id && !isRecent && pathname === '/';
+                    const isGuestActive = role === 'guest' && p.id === 'guest-root';
+                    const isStandardActive = projectId === p.id && !isRecent && pathname === '/';
+                    const isActive = role === 'guest' ? isGuestActive : isStandardActive;
+
                     return (
                         <Link
                             key={p.id}
-                            href={`/?projectId=${p.id}`}
+                            href={role === 'guest' ? '#' : `/?projectId=${p.id}`}
                             className={`${styles.navItem} ${isActive ? styles.navItemActive : ''}`}
-                            onContextMenu={canManage(p) ? (e) => {
+                            onContextMenu={canManage(p) && role !== 'guest' ? (e) => {
                                 e.preventDefault();
                                 setCtxMenu({ x: e.clientX, y: e.clientY, project: p });
                             } : undefined}
+                            onClick={role === 'guest' ? (e) => e.preventDefault() : undefined}
                         >
-                            <Folder size={20} />
-                            <span style={{ textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap', flex: 1 }}>{p.name}</span>
+                            <Folder size={16} style={{ flexShrink: 0 }} />
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{p.name}</span>
                         </Link>
                     );
                 })}
 
                 {projects.length === 0 && (
-                    <div style={{ padding: '0 16px', fontSize: '0.85rem', color: 'var(--text-light)' }}>No projects found.</div>
+                    <div style={{ padding: '6px 14px', fontSize: '0.8rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>No projects yet.</div>
                 )}
 
-                <div style={{ height: '16px' }} />
+                {/* Divider */}
+                <div style={{ height: 1, background: 'var(--border-soft)', margin: '10px 4px' }} />
 
-                <Link href={`/?recent=true${projectId ? `&projectId=${projectId}` : ''}`} className={`${styles.navItem} ${isRecent ? styles.navItemActive : ''}`}>
-                    <Clock size={20} /> Recent Files
-                </Link>
-
-                <div style={{ flex: 1 }} />
-
-                {role === 'admin' && (
-                    <Link href="/admin" className={`${styles.navItem} ${pathname === '/admin' ? styles.navItemActive : ''}`} style={{ color: '#8b5cf6' }}>
-                        <ShieldCheck size={20} /> Admin Whitelist
+                {/* Recent */}
+                {role !== 'guest' && (
+                    <Link
+                        href={`/?recent=true${projectId ? `&projectId=${projectId}` : ''}`}
+                        className={`${styles.navItem} ${isRecent ? styles.navItemActive : ''}`}
+                    >
+                        <Clock size={16} style={{ flexShrink: 0 }} /> Recent Files
                     </Link>
                 )}
 
-                <div className={styles.navItem} style={{ cursor: 'default', opacity: 0.5 }}>
-                    <Trash2 size={20} /> Recycle Bin
-                </div>
+                <div style={{ flex: 1 }} />
 
-                <div style={{ marginTop: '24px', padding: '16px', background: 'var(--surface-color)', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                    <div style={{ fontSize: '0.9rem', color: 'var(--text-dark)', fontWeight: 600, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <Cloud size={16} color="var(--primary-color)" /> Storage Used
-                    </div>
-                    <div style={{ height: '6px', background: 'var(--bg-color)', borderRadius: '3px', overflow: 'hidden', marginBottom: '8px' }}>
-                        <div style={{ height: '100%', background: 'var(--primary-color)', width: 'min(100%, max(1%, ' + ((totalUsageBytes / (10 * 1024 * 1024 * 1024)) * 100).toFixed(1) + '%))' }} />
-                    </div>
-                    <div style={{ fontSize: '0.8rem', color: 'var(--text-light)' }}>{formatSize(totalUsageBytes)} used</div>
-                </div>
+                {/* Admin */}
+                {role === 'admin' && (
+                    <Link
+                        href="/admin"
+                        className={`${styles.navItem} ${pathname === '/admin' ? styles.navItemActive : ''}`}
+                        style={{ color: pathname === '/admin' ? undefined : '#a78bfa' }}
+                    >
+                        <ShieldCheck size={16} style={{ flexShrink: 0 }} /> Admin Whitelist
+                    </Link>
+                )}
 
-                <div style={{ marginTop: '24px', textAlign: 'center', fontSize: '0.75rem', color: 'var(--text-light)', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
-                    <div style={{ fontWeight: 600, color: 'var(--primary-color)' }}>© 2026 ICAPS CLOUDS</div>
-                    <div style={{ marginTop: '4px', opacity: 0.8 }}>Powered by Script Snack Dev</div>
+                {/* Recycle bin (placeholder) */}
+                {role !== 'guest' && (
+                    <div className={styles.navItem} style={{ cursor: 'default', opacity: 0.35, pointerEvents: 'none' }}>
+                        <Trash2 size={16} style={{ flexShrink: 0 }} /> Recycle Bin
+                    </div>
+                )}
+
+                {/* ── Storage Usage — admin only ── */}
+                {role === 'admin' && (
+                    <div style={{ margin: '16px 4px 0', padding: '14px', background: 'var(--bg-overlay)', borderRadius: 'var(--r-md)', border: '1px solid var(--border-soft)' }}>
+                        <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontWeight: 600, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '7px' }}>
+                            <Cloud size={14} color="var(--brand-end)" /> Storage
+                        </div>
+                        <div style={{ height: '5px', background: 'var(--bg-elevated)', borderRadius: '3px', overflow: 'hidden', marginBottom: '7px' }}>
+                            <div style={{
+                                height: '100%',
+                                background: 'linear-gradient(90deg, var(--brand-start), var(--brand-end))',
+                                width: `min(100%, max(1%, ${((totalUsageBytes / (10 * 1024 * 1024 * 1024)) * 100).toFixed(1)}%))`,
+                                borderRadius: '3px',
+                            }} />
+                        </div>
+                        <div style={{ fontSize: '0.73rem', color: 'var(--text-muted)' }}>{formatSize(totalUsageBytes)} of 10 GB used</div>
+                    </div>
+                )}
+
+                {/* ── Footer ── */}
+                <div style={{ marginTop: '14px', textAlign: 'center', fontSize: '0.7rem', color: 'var(--text-muted)', borderTop: '1px solid var(--border-soft)', paddingTop: '12px', lineHeight: 1.5 }}>
+                    <div style={{ fontWeight: 700, color: 'var(--brand-end)', letterSpacing: '0.02em' }}>ICAPS CLOUDS</div>
+                    <div style={{ marginTop: '2px', opacity: 0.7 }}>by Script Snack Dev</div>
                 </div>
             </nav>
 
-            {/* ──────────── Context Menu ──────────── */}
-            {ctxMenu && (
+            {/* ── Context Menu ── */}
+            {ctxMenu && typeof document !== 'undefined' && createPortal(
                 <div
                     ref={ctxRef}
                     style={{
                         position: 'fixed',
                         top: Math.min(ctxMenu.y, window.innerHeight - 160),
                         left: Math.min(ctxMenu.x, window.innerWidth - 200),
-                        background: 'var(--surface-color)',
-                        border: '1px solid var(--border-color)',
-                        borderRadius: '10px',
-                        boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+                        background: 'var(--bg-overlay)',
+                        border: '1px solid var(--border-mid)',
+                        borderRadius: 'var(--r-md)',
+                        boxShadow: '0 12px 40px rgba(0,0,0,0.6)',
                         zIndex: 9999,
                         minWidth: '180px',
                         overflow: 'hidden',
-                        padding: '4px 0',
-                        animation: 'fadeIn 0.12s ease'
+                        padding: '4px',
+                        animation: 'scaleIn 0.12s ease'
                     }}
                 >
-                    <div style={{ padding: '6px 14px 8px', fontSize: '0.75rem', color: 'var(--text-light)', borderBottom: '1px solid var(--border-color)', fontWeight: 600, letterSpacing: '0.03em' }}>
+                    <div style={{ padding: '6px 14px 8px', fontSize: '0.72rem', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-soft)', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
                         {ctxMenu.project.name}
                     </div>
                     {[
-                        { icon: <Pencil size={15} />, label: 'Rename', color: 'var(--text-dark)', action: () => { setRenameTarget(ctxMenu.project); setRenameValue(ctxMenu.project.name); closeCtx(); } },
-                        { icon: <Users size={15} />, label: 'Access Manage', color: 'var(--text-dark)', action: () => { openManage(ctxMenu.project); closeCtx(); } },
-                        { icon: <Trash2 size={15} />, label: 'Delete Project', color: '#ef4444', action: () => { setDeleteTarget(ctxMenu.project); closeCtx(); } },
+                        { icon: <Pencil size={14} />, label: 'Rename', color: 'var(--text-secondary)', action: () => { setRenameTarget(ctxMenu.project); setRenameValue(ctxMenu.project.name); closeCtx(); } },
+                        { icon: <Users size={14} />, label: 'Manage Access', color: 'var(--text-secondary)', action: () => { openManage(ctxMenu.project); closeCtx(); } },
+                        ...(ctxMenu.project.userRole === 'admin' ? [{ icon: <ClipboardList size={14} />, label: 'Activity Log', color: 'var(--text-secondary)', action: () => { setLogTarget(ctxMenu.project); closeCtx(); } }] : []),
+                        { icon: <Trash2 size={14} />, label: 'Delete Project', color: 'var(--error-text)', action: () => { setDeleteTarget(ctxMenu.project); closeCtx(); } },
                     ].map(item => (
                         <button
                             key={item.label}
                             onClick={item.action}
                             style={{
                                 width: '100%', background: 'none', border: 'none', cursor: 'pointer',
-                                padding: '9px 14px', display: 'flex', alignItems: 'center', gap: '10px',
-                                color: item.color, fontSize: '0.9rem', textAlign: 'left',
-                                transition: 'background 0.15s'
+                                padding: '8px 14px', display: 'flex', alignItems: 'center', gap: '10px',
+                                color: item.color, fontSize: '0.855rem', textAlign: 'left', fontFamily: 'var(--font)',
+                                fontWeight: 500, borderRadius: 'var(--r-sm)',
+                                transition: 'background var(--ease-fast)'
                             }}
-                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--secondary-color)')}
+                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
                             onMouseLeave={e => (e.currentTarget.style.background = 'none')}
                         >
                             {item.icon} {item.label}
                         </button>
                     ))}
-                </div>
+                </div>, document.body
             )}
 
-            {/* ──────────── Create Project Modal ──────────── */}
+            {/* ── Create Project Modal ── */}
             {showNewProject && (
                 <div style={overlay} onClick={e => { if (e.target === e.currentTarget) setShowNewProject(false); }}>
                     <div style={modalCard}>
-                        <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Create New Project</h3>
-                            <button onClick={() => setShowNewProject(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-light)' }}><X size={20} /></button>
+                        <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border-soft)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700, color: 'var(--text-primary)' }}>New Project</h3>
+                            <button onClick={() => setShowNewProject(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex' }}><X size={20} /></button>
                         </div>
                         <form onSubmit={handleCreateProject} style={{ padding: '20px 24px' }}>
                             <input autoFocus type="text" placeholder="Project Name" value={newProjectName} onChange={e => setNewProjectName(e.target.value)} style={{ ...inputStyle, marginBottom: '16px' }} />
@@ -351,13 +399,13 @@ export default function Sidebar({
                 </div>
             )}
 
-            {/* ──────────── Rename Modal ──────────── */}
+            {/* ── Rename Modal ── */}
             {renameTarget && (
                 <div style={overlay} onClick={e => { if (e.target === e.currentTarget) setRenameTarget(null); }}>
                     <div style={modalCard}>
-                        <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Rename Project</h3>
-                            <button onClick={() => setRenameTarget(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-light)' }}><X size={20} /></button>
+                        <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border-soft)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700, color: 'var(--text-primary)' }}>Rename Project</h3>
+                            <button onClick={() => setRenameTarget(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex' }}><X size={20} /></button>
                         </div>
                         <form onSubmit={handleRename} style={{ padding: '20px 24px' }}>
                             <input autoFocus type="text" value={renameValue} onChange={e => setRenameValue(e.target.value)} style={{ ...inputStyle, marginBottom: '16px' }} />
@@ -370,21 +418,21 @@ export default function Sidebar({
                 </div>
             )}
 
-            {/* ──────────── Delete Confirm Modal ──────────── */}
+            {/* ── Delete Confirm ── */}
             {deleteTarget && (
                 <div style={overlay} onClick={e => { if (e.target === e.currentTarget) setDeleteTarget(null); }}>
                     <div style={modalCard}>
-                        <div style={{ padding: '24px', textAlign: 'center' }}>
-                            <div style={{ width: '56px', height: '56px', borderRadius: '50%', background: 'rgba(239,68,68,0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
-                                <AlertTriangle size={28} color="#ef4444" />
+                        <div style={{ padding: '28px 28px 20px', textAlign: 'center' }}>
+                            <div style={{ width: '52px', height: '52px', borderRadius: '50%', background: 'var(--error-bg)', border: '1px solid var(--error-border)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+                                <AlertTriangle size={26} color="var(--error-text)" />
                             </div>
-                            <h3 style={{ margin: '0 0 8px', fontSize: '1.1rem' }}>Delete Project?</h3>
-                            <p style={{ margin: '0 0 20px', color: 'var(--text-light)', fontSize: '0.9rem', lineHeight: 1.6 }}>
-                                This will permanently delete <strong>&quot;{deleteTarget.name}&quot;</strong> and all files inside it. This action cannot be undone.
+                            <h3 style={{ margin: '0 0 10px', fontSize: '1.1rem', color: 'var(--text-primary)', fontWeight: 700 }}>Delete Project?</h3>
+                            <p style={{ margin: '0 0 24px', color: 'var(--text-secondary)', fontSize: '0.875rem', lineHeight: 1.6 }}>
+                                This will permanently delete <strong style={{ color: 'var(--text-primary)' }}>&quot;{deleteTarget.name}&quot;</strong> and all files. This cannot be undone.
                             </p>
                             <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
                                 <button onClick={() => setDeleteTarget(null)} style={btnGhost}>Cancel</button>
-                                <button onClick={handleDelete} disabled={isDeleting} style={{ ...btnPrimary, background: '#ef4444' }}>
+                                <button onClick={handleDelete} disabled={isDeleting} style={{ ...btnPrimary, background: 'var(--error-bg)', color: 'var(--error-text)', border: '1px solid var(--error-border)', boxShadow: 'none' }}>
                                     {isDeleting ? 'Deleting...' : 'Delete Project'}
                                 </button>
                             </div>
@@ -393,48 +441,48 @@ export default function Sidebar({
                 </div>
             )}
 
-            {/* ──────────── Access Manage Modal ──────────── */}
+            {/* ── Manage Access Modal ── */}
             {manageTarget && (
                 <div style={overlay} onClick={e => { if (e.target === e.currentTarget) setManageTarget(null); }}>
                     <div style={{ ...modalCard, width: '520px', maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}>
-                        <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
+                        <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border-soft)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
                             <div>
-                                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Access Manage</h3>
-                                <p style={{ margin: '2px 0 0', fontSize: '0.8rem', color: 'var(--text-light)' }}>{manageTarget.name}</p>
+                                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700, color: 'var(--text-primary)' }}>Manage Access</h3>
+                                <p style={{ margin: '2px 0 0', fontSize: '0.78rem', color: 'var(--text-muted)' }}>{manageTarget.name}</p>
                             </div>
-                            <button onClick={() => setManageTarget(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-light)' }}><X size={20} /></button>
+                            <button onClick={() => setManageTarget(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex' }}><X size={20} /></button>
                         </div>
 
                         {/* Members list */}
                         <div style={{ overflowY: 'auto', flex: 1, padding: '16px 24px' }}>
                             {loadingMembers ? (
-                                <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-light)' }}>Loading...</div>
+                                <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)' }}>Loading...</div>
                             ) : members.length === 0 ? (
-                                <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-light)', fontSize: '0.9rem' }}>No members yet.</div>
+                                <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)', fontSize: '0.875rem' }}>No members yet.</div>
                             ) : (
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '16px' }}>
                                     {members.map(m => (
-                                        <div key={m.email} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 12px', borderRadius: '8px', background: 'var(--secondary-color)', border: '1px solid var(--border-color)' }}>
-                                            <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: 'var(--primary-color)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontSize: '0.75rem', fontWeight: 700, flexShrink: 0 }}>
+                                        <div key={m.email} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 12px', borderRadius: 'var(--r-md)', background: 'var(--bg-elevated)', border: '1px solid var(--border-soft)' }}>
+                                            <div style={{ width: '30px', height: '30px', borderRadius: 'var(--r-full)', background: 'linear-gradient(135deg, var(--brand-start), var(--brand-end))', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontSize: '0.7rem', fontWeight: 700, flexShrink: 0 }}>
                                                 {m.email.substring(0, 2).toUpperCase()}
                                             </div>
                                             <div style={{ flex: 1, minWidth: 0 }}>
-                                                <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-dark)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.email}</div>
+                                                <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.email}</div>
                                             </div>
                                             <div style={{ position: 'relative', flexShrink: 0 }}>
                                                 <select
                                                     value={m.role}
                                                     onChange={e => handleRoleChange(m.email, e.target.value)}
-                                                    style={{ padding: '4px 24px 4px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'var(--bg-color)', color: 'var(--text-dark)', fontSize: '0.8rem', cursor: 'pointer', appearance: 'none', WebkitAppearance: 'none' }}
+                                                    style={{ padding: '4px 24px 4px 8px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border-mid)', background: 'var(--bg-overlay)', color: 'var(--text-primary)', fontSize: '0.78rem', cursor: 'pointer', appearance: 'none', WebkitAppearance: 'none' }}
                                                 >
                                                     {Object.entries(ROLE_LABELS).map(([val, label]) => (
                                                         <option key={val} value={val}>{label}</option>
                                                     ))}
                                                 </select>
-                                                <ChevronDown size={12} style={{ position: 'absolute', right: '6px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: 'var(--text-light)' }} />
+                                                <ChevronDown size={12} style={{ position: 'absolute', right: '6px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: 'var(--text-muted)' }} />
                                             </div>
-                                            <button onClick={() => handleRemoveMember(m.email)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', padding: '4px', borderRadius: '4px', flexShrink: 0 }} title="Remove member">
-                                                <UserMinus size={16} />
+                                            <button onClick={() => handleRemoveMember(m.email)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--error-text)', padding: '4px', borderRadius: 'var(--r-sm)', flexShrink: 0, display: 'flex', alignItems: 'center' }} title="Remove">
+                                                <UserMinus size={15} />
                                             </button>
                                         </div>
                                     ))}
@@ -443,9 +491,9 @@ export default function Sidebar({
                         </div>
 
                         {/* Add member form */}
-                        <div style={{ padding: '16px 24px', borderTop: '1px solid var(--border-color)', flexShrink: 0 }}>
-                            <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-light)', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <UserPlus size={14} /> ADD MEMBER
+                        <div style={{ padding: '14px 24px', borderTop: '1px solid var(--border-soft)', flexShrink: 0 }}>
+                            <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '6px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                                <UserPlus size={13} /> Add Member
                             </div>
                             {(() => {
                                 const memberEmails = new Set(members.map(m => m.email));
@@ -464,28 +512,36 @@ export default function Sidebar({
                                                     <option key={u.email} value={u.email}>{u.email}</option>
                                                 ))}
                                             </select>
-                                            <ChevronDown size={14} style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: 'var(--text-light)' }} />
+                                            <ChevronDown size={13} style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: 'var(--text-muted)' }} />
                                         </div>
                                         <div style={{ position: 'relative', flexShrink: 0 }}>
-                                            <select value={addRole} onChange={e => setAddRole(e.target.value as typeof addRole)} style={{ height: '38px', padding: '0 28px 0 10px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'var(--bg-color)', color: 'var(--text-dark)', fontSize: '0.85rem', cursor: 'pointer', appearance: 'none', WebkitAppearance: 'none' }}>
+                                            <select value={addRole} onChange={e => setAddRole(e.target.value as typeof addRole)} style={{ height: '38px', padding: '0 28px 0 10px', borderRadius: 'var(--r-md)', border: '1px solid var(--border-mid)', background: 'var(--bg-elevated)', color: 'var(--text-primary)', fontSize: '0.82rem', cursor: 'pointer', appearance: 'none', WebkitAppearance: 'none' }}>
                                                 {Object.entries(ROLE_LABELS).map(([val, label]) => (
                                                     <option key={val} value={val}>{label}</option>
                                                 ))}
                                             </select>
-                                            <ChevronDown size={12} style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: 'var(--text-light)' }} />
+                                            <ChevronDown size={12} style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: 'var(--text-muted)' }} />
                                         </div>
-                                        <button type="submit" disabled={isAddingMember || !addEmail} style={{ ...btnPrimary, padding: '0 16px', height: '38px', flexShrink: 0 }}>
-                                            {isAddingMember ? '...' : <UserPlus size={16} />}
+                                        <button type="submit" disabled={isAddingMember || !addEmail} style={{ ...btnPrimary, padding: '0 14px', height: '38px', flexShrink: 0, display: 'flex', alignItems: 'center' }}>
+                                            {isAddingMember ? '...' : <UserPlus size={15} />}
                                         </button>
                                     </form>
                                 );
                             })()}
                             {whitelistUsers.filter(u => !members.map(m => m.email).includes(u.email)).length === 0 && !loadingMembers && (
-                                <p style={{ margin: '8px 0 0', fontSize: '0.8rem', color: 'var(--text-light)' }}>All whitelisted users are already members.</p>
+                                <p style={{ margin: '8px 0 0', fontSize: '0.78rem', color: 'var(--text-muted)' }}>All whitelisted users are already members.</p>
                             )}
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* ── Activity Log Modal ── */}
+            {logTarget && (
+                <ActivityLogModal
+                    projectId={logTarget.id}
+                    onClose={() => setLogTarget(null)}
+                />
             )}
         </aside>
     );

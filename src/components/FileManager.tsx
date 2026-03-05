@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import styles from './FileManager.module.css';
 import {
     fetchNodes,
@@ -18,11 +19,14 @@ import {
     getFolderPath,
     renameNode,
     moveNode,
-    fetchProject
+    fetchProject,
+    logDownload,
+    getPreviewUrl
 } from '@/app/actions';
+import FilePreviewModal from '@/components/FilePreviewModal';
 import {
     FolderPlus, UploadCloud, Folder, File,
-    Trash2, ArrowLeft, DownloadCloud, FileText, Image as ImageIcon, Video, Archive, Share2, Copy, Link as LinkIcon, ExternalLink, Edit2, MoveRight, ChevronRight
+    Trash2, ArrowLeft, DownloadCloud, FileText, Image as ImageIcon, Video, Archive, Share2, Copy, Link as LinkIcon, ExternalLink, Edit2, MoveRight, ChevronRight, CheckSquare, Square
 } from 'lucide-react';
 import type { DriveNode } from '@/lib/supabase';
 import { useSearchParams, useRouter } from 'next/navigation';
@@ -51,6 +55,16 @@ export default function FileManager() {
     const [isUploading, setIsUploading] = useState(false);
     const [projectRole, setProjectRole] = useState<'admin' | 'member' | 'read_only'>('read_only');
     const [projectName, setProjectName] = useState('Workspace');
+
+    // Drag-and-drop upload state
+    const [isDragOver, setIsDragOver] = useState(false);
+    const dragCounter = useRef(0); // track nested drag enter/leave
+
+    // File Preview
+    const [previewNode, setPreviewNode] = useState<DriveNode | null>(null);
+
+    // Multi-select
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
     // Move Node States
     const [moveNodeData, setMoveNodeData] = useState<DriveNode | null>(null);
@@ -240,24 +254,147 @@ export default function FileManager() {
         e.dataTransfer.setData('application/json', JSON.stringify({ nodeId: node.id }));
     };
 
-    const handleDragOver = (e: React.DragEvent) => {
-        if (projectRole !== 'read_only') {
-            e.preventDefault();
+    // ── Upload a single File object into the current context ──
+    const uploadSingleFile = async (
+        file: File,
+        parentId: string | null,
+        projectId: string | undefined
+    ) => {
+        const mimeType = file.type || 'application/octet-stream';
+        const taskId = `up-${Date.now()}-${Math.random()}`;
+        addTransfer(taskId, `Uploading ${file.name}`, 'upload');
+        const { uploadUrl, key } = await getUploadPresignedUrl(file.name, mimeType, projectId, parentId);
+        if (uploadUrl !== 'mock-url') {
+            await new Promise<void>((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.upload.onprogress = (ev) => {
+                    if (ev.lengthComputable) updateTransfer(taskId, Math.round((ev.loaded / ev.total) * 100));
+                };
+                xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`Upload failed ${xhr.status}`))),
+                    xhr.onerror = () => reject(new Error('Network error'));
+                xhr.open('PUT', uploadUrl);
+                xhr.setRequestHeader('Content-Type', mimeType);
+                xhr.send(file);
+            });
         }
+        await saveFileRecord(file.name, key, file.size, mimeType, parentId, projectId);
+        completeTransfer(taskId, 'completed');
+    };
+
+    // ── Recursively process a FileSystemEntry (file or directory) ──
+    const processEntry = async (
+        entry: FileSystemEntry,
+        parentId: string | null,
+        projectId: string | undefined
+    ): Promise<void> => {
+        if (entry.isFile) {
+            const file = await new Promise<File>((resolve, reject) =>
+                (entry as FileSystemFileEntry).file(resolve, reject)
+            );
+            await uploadSingleFile(file, parentId, projectId);
+        } else if (entry.isDirectory) {
+            // Create folder via server action (respects RLS + activity logging)
+            await createFolderFolder(entry.name, parentId, projectId);
+            // Fetch the id of the just-created folder
+            const { supabase } = await import('@/lib/supabase');
+            const q = supabase
+                .from('share_nodes')
+                .select('id')
+                .eq('name', entry.name)
+                .eq('type', 'folder')
+                .order('created_at', { ascending: false })
+                .limit(1);
+            const finalQ = parentId ? q.eq('parent_id', parentId) : q.is('parent_id', null);
+            const { data: folderRow } = await finalQ.single();
+            const newFolderId = folderRow?.id ?? null;
+
+            // Read directory children
+            const reader = (entry as FileSystemDirectoryEntry).createReader();
+            const readAll = (): Promise<FileSystemEntry[]> =>
+                new Promise((resolve, reject) => {
+                    const allEntries: FileSystemEntry[] = [];
+                    const readBatch = () => {
+                        reader.readEntries((batch) => {
+                            if (batch.length === 0) resolve(allEntries);
+                            else { allEntries.push(...batch); readBatch(); }
+                        }, reject);
+                    };
+                    readBatch();
+                });
+
+            const children = await readAll();
+            for (const child of children) {
+                await processEntry(child, newFolderId, projectId);
+            }
+        }
+    };
+
+    const handleDragEnter = (e: React.DragEvent) => {
+        e.preventDefault();
+        // Only show overlay for external OS files (not internal node drag)
+        if (e.dataTransfer.types.includes('Files')) {
+            dragCounter.current++;
+            setIsDragOver(true);
+        }
+    };
+
+    const handleDragLeave = (e: React.DragEvent) => {
+        e.preventDefault();
+        if (e.dataTransfer.types.includes('Files')) {
+            dragCounter.current--;
+            if (dragCounter.current <= 0) {
+                dragCounter.current = 0;
+                setIsDragOver(false);
+            }
+        }
+    };
+
+    const handleDragOver = (e: React.DragEvent) => {
+        if (projectRole !== 'read_only') e.preventDefault();
     };
 
     const handleDrop = async (e: React.DragEvent, targetFolderId: string | null) => {
         e.preventDefault();
+        setIsDragOver(false);
+        dragCounter.current = 0;
         if (projectRole === 'read_only') return;
+
+        const projectId = searchParams?.get('projectId') || undefined;
+
+        // ── Case 1: OS file/folder drop ──
+        if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+            const items = Array.from(e.dataTransfer.items);
+            const entries = items
+                .map(item => item.webkitGetAsEntry?.())
+                .filter((entry): entry is FileSystemEntry => entry !== null && entry !== undefined);
+
+            if (entries.length > 0) {
+                setIsUploading(true);
+                try {
+                    for (const entry of entries) {
+                        await processEntry(entry, targetFolderId, projectId);
+                    }
+                    showToast(`Uploaded ${entries.length} item(s)`, 'success');
+                    loadData();
+                } catch (err) {
+                    console.error(err);
+                    showToast('Upload failed', 'error');
+                } finally {
+                    setIsUploading(false);
+                }
+                return; // don't fall through to move logic
+            }
+        }
+
+        // ── Case 2: Internal node drag (move) ──
         try {
             const data = e.dataTransfer.getData('application/json');
             if (!data) return;
             const { nodeId } = JSON.parse(data);
             if (nodeId === targetFolderId) return;
-
             setLoading(true);
             await moveNode(nodeId, targetFolderId);
-            showToast('Moved successfully via Drop', 'success');
+            showToast('Moved successfully', 'success');
             loadData();
         } catch (err: any) {
             showToast(err.message || 'Move failed', 'error');
@@ -404,11 +541,58 @@ export default function FileManager() {
                 await deleteNode(node.id, node.r2_key);
                 loadData();
                 showToast(`Deleted ${node.name}`, 'success');
+                setSelectedIds(prev => { const n = new Set(prev); n.delete(node.id); return n; });
             } catch (err) {
                 console.error(err);
                 showToast('Delete failed', 'error');
             }
         });
+    };
+
+    const handleMultiDelete = async () => {
+        if (selectedIds.size === 0) return;
+        showConfirm(`Are you sure you want to delete ${selectedIds.size} items?`, async () => {
+            setLoading(true);
+            try {
+                const nodesToDelete = nodes.filter(n => selectedIds.has(n.id));
+                for (const node of nodesToDelete) {
+                    await deleteNode(node.id, node.r2_key);
+                }
+                showToast(`Deleted ${selectedIds.size} items`, 'success');
+                setSelectedIds(new Set());
+                loadData();
+            } catch (err) {
+                console.error(err);
+                showToast('Failed to delete some items', 'error');
+                loadData();
+            }
+        });
+    };
+
+    const toggleSelectAll = () => {
+        if (selectedIds.size === nodes.length && nodes.length > 0) {
+            setSelectedIds(new Set());
+        } else {
+            setSelectedIds(new Set(nodes.map(n => n.id)));
+        }
+    };
+
+    const toggleSelect = (e: React.MouseEvent, id: string) => {
+        e.stopPropagation();
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
+    const handleNodeClick = (node: DriveNode) => {
+        if (node.type === 'folder') {
+            navigateToFolder(node);
+        } else {
+            setPreviewNode(node);
+        }
     };
 
     const navigateToFolder = (node: DriveNode) => {
@@ -473,6 +657,9 @@ export default function FileManager() {
                     a.remove();
                     URL.revokeObjectURL(blobUrl);
                     completeTransfer(taskId, 'completed');
+                    // Fire-and-forget log
+                    const projectId = searchParams?.get('projectId') || null;
+                    logDownload(node.id, node.name, projectId);
                 } else {
                     completeTransfer(taskId, 'error');
                 }
@@ -567,12 +754,12 @@ export default function FileManager() {
     };
 
     const getFileIcon = (mimeType: string | null) => {
-        if (!mimeType) return <File size={20} className={styles.fileIcon} />;
-        if (mimeType.includes('image')) return <ImageIcon size={20} color="#10b981" />;
-        if (mimeType.includes('video')) return <Video size={20} color="#f43f5e" />;
-        if (mimeType.includes('pdf')) return <FileText size={20} color="#ef4444" />;
-        if (mimeType.includes('zip') || mimeType.includes('compressed')) return <Archive size={20} color="#f59e0b" />;
-        return <File size={20} className={styles.fileIcon} />;
+        if (!mimeType) return <File size={18} className={styles.fileIcon} />;
+        if (mimeType.includes('image')) return <ImageIcon size={18} color="#34d399" />;
+        if (mimeType.includes('video')) return <Video size={18} color="#f87171" />;
+        if (mimeType.includes('pdf')) return <FileText size={18} color="#f87171" />;
+        if (mimeType.includes('zip') || mimeType.includes('compressed')) return <Archive size={18} color="#fbbf24" />;
+        return <File size={18} className={styles.fileIcon} />;
     };
 
     const formatSize = (bytes: number | null) => {
@@ -587,7 +774,7 @@ export default function FileManager() {
             <div className={styles.toolbar}>
                 <div className={styles.breadcrumb}>
                     {searchParams?.get('recent') === 'true' ? (
-                        <span style={{ color: 'var(--text-dark)', fontWeight: 600 }}>Recent Uploads</span>
+                        <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Recent Uploads</span>
                     ) : (
                         <>
                             {currentFolder.id && (
@@ -639,8 +826,8 @@ export default function FileManager() {
                             {/* Current folder */}
                             {currentFolder.id && (
                                 <>
-                                    <ChevronRight size={14} style={{ color: 'var(--text-light)', margin: '0 2px', flexShrink: 0 }} />
-                                    <span style={{ color: 'var(--text-dark)', fontWeight: 600 }}>{currentFolder.name}</span>
+                                    <ChevronRight size={14} style={{ color: 'var(--text-muted)', margin: '0 2px', flexShrink: 0 }} />
+                                    <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{currentFolder.name}</span>
                                 </>
                             )}
                         </>
@@ -648,11 +835,9 @@ export default function FileManager() {
                 </div>
 
                 {isGlobalRoot && projectRole === 'admin' && (
-                    <div style={{ padding: '10px 16px', background: '#eff6ff', border: '1px solid #dbeafe', borderRadius: '8px', color: '#1e40af', fontSize: '0.9rem', marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span style={{ fontSize: '1.2rem' }}>ℹ️</span>
-                        <div>
-                            <strong>Global View:</strong> You are viewing files outside of any project. Select a project from the sidebar for better organization.
-                        </div>
+                    <div style={{ padding: '10px 16px', background: 'var(--info-bg)', border: '1px solid var(--info-border)', borderRadius: 'var(--r-md)', color: 'var(--info-text)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <span style={{ fontSize: '1rem', flexShrink: 0 }}>ℹ️</span>
+                        <div><strong>Global View:</strong> Viewing files outside any project. Select a project from the sidebar.</div>
                     </div>
                 )}
 
@@ -697,58 +882,124 @@ export default function FileManager() {
                         />
                     </div>
                 )}
+
             </div>
 
-            <div className={styles.content} onDragOver={handleDragOver} onDrop={(e) => handleDrop(e, currentFolder.id)}>
+            {/* ── Drop overlay ── */}
+            <div
+                className={styles.content}
+                onDragEnter={handleDragEnter}
+                onDragLeave={handleDragLeave}
+                onDragOver={handleDragOver}
+                onDrop={(e) => handleDrop(e, currentFolder.id)}
+                style={{ position: 'relative' }}
+            >
+                {/* Full-area drop target overlay */}
+                {isDragOver && projectRole !== 'read_only' && (
+                    <div style={{
+                        position: 'absolute', inset: 0,
+                        zIndex: 50,
+                        background: 'rgba(99,102,241,0.08)',
+                        border: '2px dashed var(--brand-end)',
+                        borderRadius: 'var(--r-lg)',
+                        display: 'flex', flexDirection: 'column',
+                        alignItems: 'center', justifyContent: 'center',
+                        gap: 12,
+                        pointerEvents: 'none',
+                        transition: 'all 0.15s',
+                        backdropFilter: 'blur(2px)',
+                    }}>
+                        <div style={{
+                            width: 72, height: 72, borderRadius: '50%',
+                            background: 'rgba(99,102,241,0.15)',
+                            border: '2px solid var(--brand-end)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            animation: 'pulse 1.5s ease-in-out infinite',
+                        }}>
+                            <UploadCloud size={32} color="var(--brand-end)" />
+                        </div>
+                        <div style={{ textAlign: 'center' }}>
+                            <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--brand-end)' }}>Drop to upload</div>
+                            <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: 4 }}>Files and folders supported</div>
+                        </div>
+                    </div>
+                )}
                 {loading ? (
-                    <div className={styles.emptyState}>Loading...</div>
+                    <div className={styles.loadingState}>
+                        {[...Array(8)].map((_, i) => (
+                            <div key={i} className={styles.skeletonRow} style={{ opacity: 1 - i * 0.09 }} />
+                        ))}
+                    </div>
                 ) : (
                     <>
                         <div className={styles.listHeader}>
-                            <div>Name</div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                <div onClick={toggleSelectAll} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', color: selectedIds.size > 0 && selectedIds.size === nodes.length ? 'var(--brand-end)' : 'var(--text-muted)' }}>
+                                    {selectedIds.size > 0 && selectedIds.size === nodes.length ? <CheckSquare size={16} /> : <Square size={16} />}
+                                </div>
+                                Name
+                            </div>
                             <div>Modified</div>
-                            <div>File Size</div>
+                            <div>Size</div>
+                            <div />
                         </div>
 
                         {nodes.length === 0 ? (
                             <div className={styles.emptyState}>
-                                <Folder size={48} color="var(--border-color)" />
+                                <Folder size={44} color="var(--text-muted)" />
                                 <p>This folder is empty.</p>
                             </div>
                         ) : (
                             nodes.map(node => (
                                 <div
                                     key={node.id}
-                                    className={`${styles.listItem} ${styles.rowHover}`}
+                                    className={styles.listItem}
                                     draggable={projectRole !== 'read_only'}
                                     onDragStart={(e) => handleDragStart(e, node)}
-                                    // if it's a folder, it can receive drops
                                     onDragOver={node.type === 'folder' ? handleDragOver : undefined}
                                     onDrop={node.type === 'folder' ? (e) => {
-                                        e.stopPropagation(); // don't bubble up to the root content area
+                                        e.stopPropagation();
                                         handleDrop(e, node.id);
                                     } : undefined}
-                                    onClick={() => navigateToFolder(node)}
+                                    onClick={() => handleNodeClick(node)}
                                     onContextMenu={(e) => {
                                         e.preventDefault();
                                         setContextMenu({ x: e.clientX, y: e.clientY, node });
                                     }}
+                                    style={{ background: selectedIds.has(node.id) ? 'rgba(99,102,241,0.08)' : undefined }}
                                 >
                                     <div className={styles.nameCol}>
+                                        <div onClick={(e) => toggleSelect(e, node.id)} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', color: selectedIds.has(node.id) ? 'var(--brand-end)' : 'var(--border-mid)', marginRight: 12 }}>
+                                            {selectedIds.has(node.id) ? <CheckSquare size={16} /> : <Square size={16} />}
+                                        </div>
                                         <div className={styles.iconWrapper}>
                                             {node.type === 'folder' ? (
-                                                <Folder size={20} color="var(--primary-color)" fill="var(--primary-color)" fillOpacity={0.2} />
+                                                <Folder size={18} color="var(--brand-end)" fill="var(--brand-end)" fillOpacity={0.18} className={styles.folderIcon} />
                                             ) : (
                                                 getFileIcon(node.mime_type)
                                             )}
                                         </div>
-                                        {node.name}
+                                        <span className={styles.nameText}>{node.name}</span>
                                     </div>
-                                    <div style={{ color: 'var(--text-light)', fontSize: '0.9rem' }}>
+                                    <div className={styles.metaCol}>
                                         {new Date(node.updated_at).toLocaleDateString()}
                                     </div>
-                                    <div style={{ color: 'var(--text-light)', fontSize: '0.9rem' }}>
+                                    <div className={styles.metaCol}>
                                         {formatSize(node.size)}
+                                    </div>
+                                    <div className={styles.rowActions} onClick={e => e.stopPropagation()}>
+                                        {node.type === 'file' ? (
+                                            <button className={styles.itemBtn} title="Download" onClick={(e) => { handleDownload(e, node); }}>
+                                                <DownloadCloud size={15} />
+                                            </button>
+                                        ) : (
+                                            <button className={styles.itemBtn} title="Download Folder" onClick={(e) => { handleDownloadFolder(e, node); }}>
+                                                <DownloadCloud size={15} />
+                                            </button>
+                                        )}
+                                        <button className={styles.itemBtn} title="Share" onClick={(e) => { openShareModal(e, node); }}>
+                                            <Share2 size={15} />
+                                        </button>
                                     </div>
                                 </div>
                             ))
@@ -756,6 +1007,52 @@ export default function FileManager() {
                     </>
                 )}
             </div>
+
+            {/* ── Multi-select Action Bar ── */}
+            {selectedIds.size > 0 && (
+                <div style={{
+                    position: 'fixed', bottom: 32, left: '50%', transform: 'translateX(-50%)',
+                    background: 'var(--bg-surface)', border: '1px solid var(--border-mid)',
+                    boxShadow: '0 12px 32px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05)',
+                    borderRadius: 'var(--r-full)', padding: '8px 16px', zIndex: 900,
+                    display: 'flex', alignItems: 'center', gap: 20,
+                    animation: 'slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+                    backdropFilter: 'blur(12px)'
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.9rem' }}>
+                        <div style={{ background: 'var(--brand-end)', color: 'white', borderRadius: '50%', width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.8rem' }}>
+                            {selectedIds.size}
+                        </div>
+                        selected
+                    </div>
+                    <div style={{ width: 1, height: 24, background: 'var(--border-soft)' }} />
+                    <div style={{ display: 'flex', gap: 8 }}>
+                        {projectRole !== 'read_only' && (
+                            <button
+                                onClick={handleMultiDelete}
+                                style={{
+                                    display: 'flex', alignItems: 'center', gap: 6,
+                                    background: 'rgba(239,68,68,0.1)', color: 'var(--error-text)', border: 'none',
+                                    padding: '6px 12px', borderRadius: 'var(--r-full)', cursor: 'pointer',
+                                    fontWeight: 600, fontSize: '0.85rem'
+                                }}
+                            >
+                                <Trash2 size={16} /> Delete
+                            </button>
+                        )}
+                        <button
+                            onClick={() => setSelectedIds(new Set())}
+                            style={{
+                                background: 'transparent', color: 'var(--text-muted)', border: 'none',
+                                padding: '6px 12px', borderRadius: 'var(--r-full)', cursor: 'pointer',
+                                fontWeight: 500, fontSize: '0.85rem'
+                            }}
+                        >
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+            )}
 
             {showFolderModal && (
                 <div className={styles.modalOverlay}>
@@ -905,24 +1202,36 @@ export default function FileManager() {
                                         <h4 style={{ fontSize: '0.9rem', marginBottom: '12px', color: 'var(--text-dark)' }}>Active Links</h4>
                                         <div style={{ maxHeight: '150px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                             {activeLinks.map(link => (
-                                                <div key={link.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-color)', padding: '8px 12px', borderRadius: '6px' }}>
+                                                <div key={link.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-elevated)', padding: '8px 12px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border-soft)' }}>
                                                     <div style={{ fontSize: '0.8rem' }}>
-                                                        <div>Created: {new Date(link.created_at).toLocaleDateString()}</div>
+                                                        <div style={{ color: 'var(--text-primary)', fontWeight: 600, marginBottom: '2px' }}>Created: {new Date(link.created_at).toLocaleDateString()}</div>
                                                         {link.expires_at ? (
-                                                            <div style={{ color: new Date(link.expires_at) < new Date() ? '#ef4444' : 'var(--text-light)' }}>
+                                                            <div style={{ color: new Date(link.expires_at) < new Date() ? '#ef4444' : 'var(--text-muted)' }}>
                                                                 Expires: {new Date(link.expires_at).toLocaleDateString()}
                                                             </div>
                                                         ) : (
-                                                            <div style={{ color: 'var(--text-light)' }}>Never Expires</div>
+                                                            <div style={{ color: 'var(--text-muted)' }}>Never Expires</div>
                                                         )}
                                                     </div>
-                                                    <button
-                                                        className={styles.secondaryBtn}
-                                                        style={{ padding: '4px 8px', fontSize: '0.75rem', borderColor: '#ef4444', color: '#ef4444' }}
-                                                        onClick={() => handleRevokeShareLink(link.id)}
-                                                    >
-                                                        Revoke
-                                                    </button>
+                                                    <div style={{ display: 'flex', gap: '8px' }}>
+                                                        <button
+                                                            className={styles.secondaryBtn}
+                                                            style={{ padding: '4px 8px', fontSize: '0.75rem', borderColor: 'var(--border-mid)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '4px' }}
+                                                            onClick={() => {
+                                                                navigator.clipboard.writeText(`${window.location.origin}/s/${link.id}`);
+                                                                showToast('Link copied to clipboard!', 'success');
+                                                            }}
+                                                        >
+                                                            <Copy size={12} /> Copy
+                                                        </button>
+                                                        <button
+                                                            className={styles.secondaryBtn}
+                                                            style={{ padding: '4px 8px', fontSize: '0.75rem', borderColor: 'rgba(239,68,68,0.3)', color: '#ef4444', background: 'rgba(239,68,68,0.05)' }}
+                                                            onClick={() => handleRevokeShareLink(link.id)}
+                                                        >
+                                                            Revoke
+                                                        </button>
+                                                    </div>
                                                 </div>
                                             ))}
                                         </div>
@@ -931,8 +1240,8 @@ export default function FileManager() {
                             </>
                         ) : (
                             <>
-                                <div style={{ background: '#f0fdf4', color: '#166534', padding: '12px', borderRadius: '8px', marginBottom: '16px', fontSize: '0.95rem' }}>
-                                    Link generated successfully!
+                                <div style={{ background: 'var(--success-bg)', color: 'var(--success-text)', border: '1px solid var(--success-border)', padding: '12px 16px', borderRadius: 'var(--r-md)', marginBottom: '16px', fontSize: '0.875rem', fontWeight: 600 }}>
+                                    ✓ Link generated successfully!
                                 </div>
                                 <div style={{ display: 'flex', gap: '8px', marginBottom: '24px' }}>
                                     <input
@@ -962,42 +1271,40 @@ export default function FileManager() {
                 </div>
             )}
 
-            {/* Transfer Queue UI */}
+            {/* ── Transfer Queue Panel ── */}
             {transfers.length > 0 && showTransfers && (
                 <div style={{
-                    position: 'fixed',
-                    bottom: '24px',
-                    right: '24px',
-                    width: '350px',
-                    background: 'var(--surface-color)',
-                    boxShadow: 'var(--shadow-md)',
-                    borderRadius: '8px',
-                    zIndex: 1000,
-                    border: '1px solid var(--border-color)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    overflow: 'hidden'
+                    position: 'fixed', bottom: '24px', right: '24px', width: '340px',
+                    background: 'var(--bg-surface)', border: '1px solid var(--border-mid)',
+                    borderRadius: 'var(--r-lg)', zIndex: 1000,
+                    boxShadow: '0 16px 48px rgba(0,0,0,0.6)',
+                    display: 'flex', flexDirection: 'column', overflow: 'hidden',
+                    animation: 'scaleIn 0.2s ease-out'
                 }}>
-                    <div style={{ background: 'var(--primary-color)', color: '#fff', padding: '12px 16px', fontWeight: 600, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{
+                        background: 'linear-gradient(135deg, var(--brand-start), var(--brand-mid))',
+                        color: '#fff', padding: '11px 16px', fontWeight: 600, fontSize: '0.85rem',
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+                    }}>
                         <span>Transfers ({transfers.filter(t => t.status === 'completed').length}/{transfers.length})</span>
-                        <div style={{ display: 'flex', gap: '12px' }}>
-                            <button onClick={() => setShowTransfers(false)} style={{ color: '#fff', opacity: 0.8 }} title="Minimize">_</button>
-                            <button onClick={() => setTransfers([])} style={{ color: '#fff', opacity: 0.8 }} title="Close">✕</button>
+                        <div style={{ display: 'flex', gap: '10px' }}>
+                            <button onClick={() => setShowTransfers(false)} style={{ color: 'rgba(255,255,255,0.7)', fontSize: '1rem', fontWeight: 700 }}>−</button>
+                            <button onClick={() => setTransfers([])} style={{ color: 'rgba(255,255,255,0.7)', fontSize: '1rem', fontWeight: 700 }}>✕</button>
                         </div>
                     </div>
-                    <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                    <div style={{ maxHeight: '280px', overflowY: 'auto' }}>
                         {transfers.map(task => (
-                            <div key={task.id} style={{ padding: '12px 16px', borderBottom: '1px solid var(--border-color)' }}>
-                                <div style={{ fontSize: '0.9rem', marginBottom: '8px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'var(--text-dark)' }}>
+                            <div key={task.id} style={{ padding: '10px 16px', borderBottom: '1px solid var(--border-soft)' }}>
+                                <div style={{ fontSize: '0.825rem', marginBottom: '7px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'var(--text-primary)', fontWeight: 500 }}>
                                     {task.name}
                                 </div>
                                 {task.status === 'running' && (
-                                    <div style={{ height: '6px', background: 'var(--bg-color)', borderRadius: '3px', overflow: 'hidden' }}>
-                                        <div style={{ height: '100%', background: 'var(--primary-color)', width: `${Math.max(5, task.progress)}%`, transition: 'width 0.2s' }} />
+                                    <div style={{ height: '4px', background: 'var(--bg-elevated)', borderRadius: '2px', overflow: 'hidden' }}>
+                                        <div style={{ height: '100%', background: 'linear-gradient(90deg, var(--brand-start), var(--brand-end))', width: `${Math.max(5, task.progress)}%`, transition: 'width 0.3s ease' }} />
                                     </div>
                                 )}
-                                {task.status === 'completed' && <div style={{ fontSize: '0.85rem', color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px' }}>✓ Completed</div>}
-                                {task.status === 'error' && <div style={{ fontSize: '0.85rem', color: '#ef4444', display: 'flex', alignItems: 'center', gap: '4px' }}>✕ Failed</div>}
+                                {task.status === 'completed' && <div style={{ fontSize: '0.78rem', color: 'var(--success-text)', fontWeight: 600 }}>✓ Completed</div>}
+                                {task.status === 'error' && <div style={{ fontSize: '0.78rem', color: 'var(--error-text)', fontWeight: 600 }}>✕ Failed</div>}
                             </div>
                         ))}
                     </div>
@@ -1007,142 +1314,127 @@ export default function FileManager() {
                 <button
                     onClick={() => setShowTransfers(true)}
                     style={{
-                        position: 'fixed', bottom: '24px', right: '24px', padding: '12px 24px',
-                        background: 'var(--surface-color)', color: 'var(--primary-color)', borderRadius: '24px',
-                        boxShadow: 'var(--shadow-md)', border: '1px solid var(--border-color)', fontWeight: 600, zIndex: 1000
+                        position: 'fixed', bottom: '24px', right: '24px',
+                        padding: '10px 20px', background: 'var(--bg-surface)',
+                        color: 'var(--brand-end)', borderRadius: 'var(--r-full)',
+                        boxShadow: '0 8px 24px rgba(0,0,0,0.5)', border: '1px solid var(--border-mid)',
+                        fontWeight: 600, fontSize: '0.85rem', zIndex: 1000
                     }}
                 >
-                    Show Transfers ({transfers.filter(t => t.status === 'running').length} running)
+                    ↑ Transfers ({transfers.filter(t => t.status === 'running').length} running)
                 </button>
             )}
 
-            {/* Context Menu Popup */}
-            {contextMenu && (
+            {/* ── Context Menu ── */}
+            {contextMenu && typeof document !== 'undefined' && createPortal(
                 <div
+                    className={styles.contextMenu}
                     style={{
                         position: 'fixed',
-                        top: contextMenu.y,
-                        left: contextMenu.x,
-                        background: 'var(--surface-color)',
-                        boxShadow: 'var(--shadow-lg)',
-                        borderRadius: 'var(--radius-md)',
-                        padding: '4px',
+                        top: Math.min(contextMenu.y, window.innerHeight - 220),
+                        left: Math.min(contextMenu.x, window.innerWidth - 200),
                         zIndex: 99999,
-                        minWidth: '180px',
-                        border: '1px solid var(--border-color)',
-                        display: 'flex',
-                        flexDirection: 'column'
                     }}
                     onClick={(e) => e.stopPropagation()}
                 >
-                    <div style={{ padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-light)', borderBottom: '1px solid var(--border-color)', marginBottom: '4px', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <div style={{ padding: '6px 12px 8px', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted)', borderBottom: '1px solid var(--border-soft)', marginBottom: '4px', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
                         {contextMenu.node.name}
                     </div>
                     {(searchParams?.get('search') || searchParams?.get('recent') === 'true') && (
                         <button className={styles.contextMenuBtn} onClick={(e) => {
                             e.stopPropagation();
                             setContextMenu(null);
-                            if (contextMenu.node.parent_id) {
-                                router.push(`/?folderId=${contextMenu.node.parent_id}`);
-                            } else {
-                                router.push(`/`);
-                            }
+                            if (contextMenu.node.parent_id) { router.push(`/?folderId=${contextMenu.node.parent_id}`); }
+                            else { router.push('/'); }
                         }}>
-                            <ExternalLink size={16} /> Go to Path
+                            <ExternalLink size={14} /> Go to Location
                         </button>
                     )}
-                    {contextMenu.node.type === 'file' && (
-                        <button className={styles.contextMenuBtn} onClick={(e) => { handleDownload(e, contextMenu.node); setContextMenu(null); }}>
-                            <DownloadCloud size={16} /> Download
-                        </button>
-                    )}
+                    <button className={styles.contextMenuBtn} onClick={(e) => {
+                        if (contextMenu.node.type === 'file') handleDownload(e, contextMenu.node);
+                        else handleDownloadFolder(e, contextMenu.node);
+                        setContextMenu(null);
+                    }}>
+                        <DownloadCloud size={14} /> Download
+                    </button>
                     {contextMenu.node.type === 'folder' && (
-                        <>
-                            <button className={styles.contextMenuBtn} onClick={(e) => { handleDownloadFolder(e, contextMenu.node); setContextMenu(null); }}>
-                                <DownloadCloud size={16} /> Download
-                            </button>
-                            <button className={styles.contextMenuBtn} onClick={(e) => {
-                                e.stopPropagation();
-                                const url = `${window.location.origin}/?folderId=${contextMenu.node.id}`;
-                                navigator.clipboard.writeText(url);
-                                showToast('Direct link copied!', 'success');
-                                setContextMenu(null);
-                            }}>
-                                <LinkIcon size={16} /> Copy Link
-                            </button>
-                        </>
+                        <button className={styles.contextMenuBtn} onClick={(e) => {
+                            e.stopPropagation();
+                            navigator.clipboard.writeText(`${window.location.origin}/?folderId=${contextMenu.node.id}`);
+                            showToast('Link copied!', 'success');
+                            setContextMenu(null);
+                        }}>
+                            <LinkIcon size={14} /> Copy Link
+                        </button>
                     )}
                     <button className={styles.contextMenuBtn} onClick={(e) => { openShareModal(e, contextMenu.node); setContextMenu(null); }}>
-                        <Share2 size={16} /> Share
+                        <Share2 size={14} /> Share
                     </button>
                     {projectRole !== 'read_only' && (
                         <>
-                            <div style={{ height: '1px', background: 'var(--border-color)', margin: '4px 0' }} />
+                            <div className={styles.contextMenuDivider} />
                             <button className={styles.contextMenuBtn} onClick={(e) => {
                                 e.stopPropagation();
                                 setRenameNodeData(contextMenu.node);
                                 setEditName(contextMenu.node.name);
                                 setContextMenu(null);
                             }}>
-                                <Edit2 size={16} /> Rename
+                                <Edit2 size={14} /> Rename
                             </button>
                             <button className={styles.contextMenuBtn} onClick={(e) => {
                                 e.stopPropagation();
                                 setMoveNodeData(contextMenu.node);
                                 setContextMenu(null);
                             }}>
-                                <MoveRight size={16} /> Move To
+                                <MoveRight size={14} /> Move To
                             </button>
-                            <button className={styles.contextMenuBtn} style={{ color: '#ef4444' }} onClick={(e) => { handleDelete(e, contextMenu.node); setContextMenu(null); }}>
-                                <Trash2 size={16} /> Delete
+                            <button className={`${styles.contextMenuBtn} ${styles.contextMenuBtnDanger}`} onClick={(e) => { handleDelete(e, contextMenu.node); setContextMenu(null); }}>
+                                <Trash2 size={14} /> Delete
                             </button>
                         </>
                     )}
-                </div>
+                </div>, document.body
             )}
-            {/* Folder Upload Confirmation Modal */}
+            {/* ── Folder Upload Confirmation ── */}
             {pendingFolderUpload && (
-                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, animation: 'fadeIn 0.2s ease-out' }}>
-                    <div style={{ background: 'var(--surface-color)', padding: '32px', borderRadius: '20px', width: '450px', boxShadow: '0 20px 50px rgba(0,0,0,0.3)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
-                        <div style={{ width: '80px', height: '80px', background: 'rgba(59, 130, 246, 0.1)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px' }}>
-                            <UploadCloud size={40} color="var(--primary-color)" />
+                <div className={styles.modalOverlay}>
+                    <div className={styles.modalContent} style={{ textAlign: 'center' }}>
+                        <div style={{ width: '64px', height: '64px', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 'var(--r-xl)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px' }}>
+                            <UploadCloud size={32} color="var(--brand-end)" />
                         </div>
-
-                        <h2 style={{ margin: '0 0 8px', fontSize: '1.5rem', fontWeight: 700, color: 'var(--text-dark)' }}>Confirm Upload</h2>
-                        <p style={{ margin: '0 0 24px', color: 'var(--text-light)', lineHeight: 1.5 }}>
-                            You are about to upload the folder <strong style={{ color: 'var(--text-dark)' }}>"{pendingFolderUpload.folderName}"</strong> containing <strong style={{ color: 'var(--primary-color)' }}>{pendingFolderUpload.files.length}</strong> files.
+                        <h2 style={{ margin: '0 0 10px', fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>Confirm Folder Upload</h2>
+                        <p style={{ margin: '0 0 20px', color: 'var(--text-secondary)', lineHeight: 1.6, fontSize: '0.875rem' }}>
+                            Upload <strong style={{ color: 'var(--text-primary)' }}>&quot;{pendingFolderUpload.folderName}&quot;</strong> with{' '}
+                            <strong style={{ color: 'var(--brand-end)' }}>{pendingFolderUpload.files.length}</strong> files.
                         </p>
-
-                        <div style={{ background: 'var(--bg-color)', padding: '16px', borderRadius: '12px', marginBottom: '24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.9rem' }}>
+                        <div style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-soft)', padding: '14px 18px', borderRadius: 'var(--r-md)', marginBottom: '22px', display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
                             <div style={{ textAlign: 'left' }}>
-                                <div style={{ color: 'var(--text-light)', marginBottom: '4px' }}>Total Size</div>
-                                <div style={{ fontWeight: 600, color: 'var(--text-dark)' }}>{formatSize(pendingFolderUpload.totalSize)}</div>
+                                <div style={{ color: 'var(--text-muted)', marginBottom: '3px', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Total Size</div>
+                                <div style={{ fontWeight: 700, color: 'var(--text-primary)' }}>{formatSize(pendingFolderUpload.totalSize)}</div>
                             </div>
                             <div style={{ textAlign: 'right' }}>
-                                <div style={{ color: 'var(--text-light)', marginBottom: '4px' }}>Destination</div>
-                                <div style={{ fontWeight: 600, color: 'var(--text-dark)' }}>{currentFolder.name}</div>
+                                <div style={{ color: 'var(--text-muted)', marginBottom: '3px', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Destination</div>
+                                <div style={{ fontWeight: 700, color: 'var(--text-primary)' }}>{currentFolder.name}</div>
                             </div>
                         </div>
-
-                        <div style={{ display: 'flex', gap: '12px' }}>
-                            <button
-                                onClick={() => {
-                                    setPendingFolderUpload(null);
-                                    if (folderInputRef.current) folderInputRef.current.value = '';
-                                }}
-                                style={{ flex: 1, padding: '12px', borderRadius: '12px', border: '1px solid var(--border-color)', background: 'transparent', cursor: 'pointer', fontWeight: 600, color: 'var(--text-dark)', transition: 'all 0.2s' }}
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                onClick={processFolderUpload}
-                                style={{ flex: 1, padding: '12px', borderRadius: '12px', border: 'none', background: 'var(--primary-color)', color: 'white', cursor: 'pointer', fontWeight: 600, boxShadow: '0 4px 12px rgba(59, 130, 246, 0.3)', transition: 'all 0.2s' }}
-                            >
-                                Start Upload
-                            </button>
+                        <div className={styles.modalActions}>
+                            <button className={styles.secondaryBtn} onClick={() => { setPendingFolderUpload(null); if (folderInputRef.current) folderInputRef.current.value = ''; }}>Cancel</button>
+                            <button className={styles.primaryBtn} onClick={processFolderUpload}><UploadCloud size={15} /> Start Upload</button>
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* ── File Preview Modal ── */}
+            {previewNode && (
+                <FilePreviewModal
+                    node={previewNode}
+                    onClose={() => setPreviewNode(null)}
+                    onDownload={() => {
+                        setPreviewNode(null);
+                        handleDownload({ stopPropagation: () => { } } as any, previewNode);
+                    }}
+                />
             )}
         </div>
     );
