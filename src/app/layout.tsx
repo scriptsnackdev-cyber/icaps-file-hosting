@@ -3,9 +3,10 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import styles from "./layout.module.css";
 import { LogOut } from "lucide-react";
-import { createClient } from '@/utils/supabase/server';
+import { createClient, createServiceClient } from '@/utils/supabase/server';
 import { signOut } from '@/app/login/actions';
 import { getTotalUsage, fetchUserProjects } from '@/app/actions';
+import { hasValidSupabaseEnv } from '@/lib/supabase';
 import Sidebar from '@/components/Sidebar';
 import { ToastProvider } from '@/components/Toast';
 import SearchBar from '@/components/SearchBar';
@@ -35,13 +36,31 @@ export default async function RootLayout({
   if (user?.email) {
     displayName = user.email.split('@')[0];
     initials = displayName.substring(0, 2).toUpperCase();
-    const { data: roleData } = await supabase
-      .from('share_whitelist')
-      .select('role')
-      .eq('email', user.email)
-      .single();
-    if (roleData) role = roleData.role;
+
+    if (hasValidSupabaseEnv) {
+      // Use Service Role Client to bypass RLS for this critical check
+      // and use ilike for case-insensitive matching
+      const serviceClient = createServiceClient();
+      const { data: roleData } = await serviceClient
+        .from('share_whitelist')
+        .select('role')
+        .ilike('email', user.email)
+        .maybeSingle();
+
+      if (roleData) role = roleData.role;
+    } else {
+      // In mock mode, default to admin to allow testing
+      role = 'admin';
+    }
+
     totalUsageBytes = await getTotalUsage();
+    projects = await fetchUserProjects();
+  } else if (!hasValidSupabaseEnv) {
+    // Completely mock state (no user)
+    displayName = 'Admin (Mock)';
+    initials = 'AM';
+    role = 'admin';
+    totalUsageBytes = 123456789;
     projects = await fetchUserProjects();
   }
 
@@ -80,7 +99,7 @@ export default async function RootLayout({
     <html lang="en">
       <body className={inter.className}>
         <ToastProvider>
-          {!user ? (
+          {!user && hasValidSupabaseEnv ? (
             <div style={{ height: '100vh', width: '100vw' }}>{children}</div>
           ) : (
             <AppShell

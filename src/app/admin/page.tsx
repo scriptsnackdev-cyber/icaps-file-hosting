@@ -1,4 +1,4 @@
-import { createClient } from '@/utils/supabase/server'
+import { createClient, createServiceClient } from '@/utils/supabase/server'
 import { getWhitelist, addWhitelistUser, removeWhitelistUser } from './actions'
 import { redirect } from 'next/navigation'
 import styles from './admin.module.css'
@@ -12,12 +12,13 @@ export default async function AdminPage() {
         redirect('/login')
     }
 
-    // Double check if user is admin
-    const { data: roleData } = await supabase
+    // Double check if user is admin using service client to bypass RLS
+    const serviceClient = createServiceClient();
+    const { data: roleData } = await serviceClient
         .from('share_whitelist')
         .select('role')
-        .eq('email', user.email)
-        .single()
+        .ilike('email', user.email)
+        .maybeSingle()
 
     if (roleData?.role !== 'admin') {
         return (
