@@ -6,7 +6,6 @@ import styles from './FileManager.module.css';
 import {
     fetchNodes,
     createFolderFolder,
-    getUploadPresignedUrl,
     saveFileRecord,
     deleteNode,
     getDownloadUrl,
@@ -263,7 +262,21 @@ export default function FileManager() {
         const mimeType = file.type || 'application/octet-stream';
         const taskId = `up-${Date.now()}-${Math.random()}`;
         addTransfer(taskId, `Uploading ${file.name}`, 'upload');
-        const { uploadUrl, key } = await getUploadPresignedUrl(file.name, mimeType, projectId, parentId);
+        // 1. Get presigned URL via API route
+        const signRes = await fetch('/api/upload/sign', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                fileName: file.name,
+                contentType: mimeType,
+                projectId,
+                parentId
+            })
+        });
+
+        if (!signRes.ok) throw new Error('Failed to get signed URL');
+        const { uploadUrl, key } = await signRes.json();
+
         if (uploadUrl !== 'mock-url') {
             await new Promise<void>((resolve, reject) => {
                 const xhr = new XMLHttpRequest();
@@ -411,12 +424,26 @@ export default function FileManager() {
         addTransfer(taskId, `Uploading ${file.name}`, 'upload');
 
         try {
-            // 1. Get presigned URL
             const projectId = searchParams?.get('projectId') || undefined;
             const mimeType = file.type || 'application/octet-stream';
-            const { uploadUrl, key } = await getUploadPresignedUrl(file.name, mimeType, projectId, currentFolder.id);
 
-            // If uploadUrl is 'mock-url' we skip actual PUT request so UI doesn't crash without keys
+            // 1. Get presigned URL via API route instead of Server Action
+            // This is "more direct" and avoids Server Action specific overhead/limits
+            const signRes = await fetch('/api/upload/sign', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    fileName: file.name,
+                    contentType: mimeType,
+                    projectId,
+                    parentId: currentFolder.id
+                })
+            });
+
+            if (!signRes.ok) throw new Error('Failed to get signed URL');
+            const { uploadUrl, key } = await signRes.json();
+
+            // 2. Upload directly to R2
             if (uploadUrl !== 'mock-url') {
                 await new Promise<void>((resolve, reject) => {
                     const xhr = new XMLHttpRequest();
@@ -431,7 +458,6 @@ export default function FileManager() {
                     };
                     xhr.onerror = () => reject(new Error('Network error during upload'));
                     xhr.open('PUT', uploadUrl);
-                    // Standard S3 PUT: send the binary file with EXACT Content-Type that was signed
                     xhr.setRequestHeader('Content-Type', mimeType);
                     xhr.send(file);
                 });
@@ -491,7 +517,20 @@ export default function FileManager() {
                 const targetParentId = folderCache.get(folderPath);
 
                 const mimeType = file.type || 'application/octet-stream';
-                const { uploadUrl, key } = await getUploadPresignedUrl(fileName, mimeType, projectId, targetParentId || null);
+                const signRes = await fetch('/api/upload/sign', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        fileName,
+                        contentType: mimeType,
+                        projectId,
+                        parentId: targetParentId || null
+                    })
+                });
+
+                if (!signRes.ok) throw new Error('Failed to get signed URL');
+                const { uploadUrl, key } = await signRes.json();
+
                 const taskId = `up-${Date.now()}-${i}`;
                 addTransfer(taskId, `Uploading ${fileName}`, 'upload');
 
@@ -510,7 +549,6 @@ export default function FileManager() {
                             };
                             xhr.onerror = () => reject(new Error('Network error during upload'));
                             xhr.open('PUT', uploadUrl);
-                            // Standard S3 PUT: send the binary file with EXACT Content-Type that was signed
                             xhr.setRequestHeader('Content-Type', mimeType);
                             xhr.send(file);
                         });
