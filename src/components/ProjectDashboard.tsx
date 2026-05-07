@@ -47,12 +47,12 @@ function formatBytes(bytes: number): string {
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-export default function ProjectDashboard({ projects }: { projects: Project[] }) {
+export default function ProjectDashboard({ projects, userRole }: { projects: Project[]; userRole: string }) {
     const router = useRouter();
     const [hoveredId, setHoveredId] = useState<string | null>(null);
 
-    // Only show projects where the user is actually a member
-    const myProjects = projects.filter(p => p.userRole !== null);
+    // If global role is admin, show all projects. Otherwise only show where user is a member.
+    const myProjects = userRole === 'admin' ? projects : projects.filter(p => p.userRole !== null);
 
     return (
         <div style={{

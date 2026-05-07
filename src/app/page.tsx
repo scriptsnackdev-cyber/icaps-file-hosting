@@ -2,6 +2,8 @@ import FileManager from '@/components/FileManager';
 import ProjectDashboard from '@/components/ProjectDashboard';
 import { fetchUserProjectsWithUsage } from '@/app/actions';
 import { Suspense } from 'react';
+import { createClient, createServiceClient } from '@/utils/supabase/server';
+import { hasValidSupabaseEnv } from '@/lib/supabase';
 
 export default async function Home({
   searchParams,
@@ -25,12 +27,29 @@ export default async function Home({
     );
   }
 
+  // Determine user role
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  let userRole = 'user';
+
+  if (user?.email && hasValidSupabaseEnv) {
+    const serviceClient = createServiceClient();
+    const { data: roleData } = await serviceClient
+      .from('share_whitelist')
+      .select('role')
+      .ilike('email', user.email)
+      .maybeSingle();
+    if (roleData) userRole = roleData.role;
+  } else if (!hasValidSupabaseEnv) {
+    userRole = 'admin';
+  }
+
   // Otherwise fetch projects with usage and render the dashboard
   const projects = await fetchUserProjectsWithUsage();
 
   return (
     <Suspense fallback={<div style={{ padding: '24px' }}>Loading projects...</div>}>
-      <ProjectDashboard projects={projects} />
+      <ProjectDashboard projects={projects} userRole={userRole} />
     </Suspense>
   );
 }

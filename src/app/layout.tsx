@@ -41,13 +41,23 @@ export default async function RootLayout({
       // Use Service Role Client to bypass RLS for this critical check
       // and use ilike for case-insensitive matching
       const serviceClient = createServiceClient();
-      const { data: roleData } = await serviceClient
+      const { data: roleData, error: roleError } = await serviceClient
         .from('share_whitelist')
         .select('role')
-        .ilike('email', user.email)
+        .ilike('email', user.email.trim())
         .maybeSingle();
 
-      if (roleData) role = roleData.role;
+      if (roleError) {
+        console.error('Error fetching user role:', roleError);
+      }
+
+      if (roleData) {
+        role = roleData.role;
+      } else {
+        // Fallback: If they are the creator of any project, they might be an admin
+        // but for now, we stick to the whitelist as the source of truth for global role.
+        console.log(`User ${user.email} not found in whitelist, defaulting to user role.`);
+      }
     } else {
       // In mock mode, default to admin to allow testing
       role = 'admin';
