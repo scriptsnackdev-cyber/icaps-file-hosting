@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { X, ExternalLink, DownloadCloud, FileText, Image as ImageIcon, Video, Music } from 'lucide-react';
-import { getPreviewUrl } from '@/app/actions';
+import { getPreviewUrl } from '@/actions/node';
 import type { DriveNode } from '@/lib/supabase';
 
 export default function FilePreviewModal({

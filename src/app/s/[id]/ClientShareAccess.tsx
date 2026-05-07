@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { verifyShareLink, getSharedFolderContents, getSharedFileDownloadUrlInside } from '@/app/actions';
+import { verifyShareLink, getSharedFolderContents, getSharedFileDownloadUrlInside } from '@/actions/share';
 import FilePreviewModal from '@/components/FilePreviewModal';
 import styles from '@/app/login/login.module.css';
 import fmStyles from '@/components/FileManager.module.css';

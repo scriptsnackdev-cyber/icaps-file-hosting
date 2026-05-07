@@ -1,4 +1,4 @@
-import { getShareLinkDetails, verifyShareLink } from '@/app/actions';
+import { getShareLinkDetails, verifyShareLink } from '@/actions/share';
 import { notFound, redirect } from 'next/navigation';
 import { createClient } from '@/utils/supabase/server';
 import ClientShareAccess from './ClientShareAccess';

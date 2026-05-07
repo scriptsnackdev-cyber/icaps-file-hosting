@@ -1,4 +1,4 @@
-'use server';
+// Barrel file for actions
 
 export {
     fetchNodes,
@@ -48,7 +48,9 @@ export {
 
 export {
     logActivity,
-    logDownload
+    logDownload,
+    fetchProjectLogs,
+    type ActivityLog
 } from '@/actions/log';
 
 export {

@@ -9,19 +9,25 @@ import {
     saveFileRecord,
     deleteNode,
     getDownloadUrl,
-    createShareLink,
     ensurePathExists,
-    getNodeShareLinks,
-    revokeShareLink,
     fetchRecentNodes,
-    getMyRoleInProject,
     getFolderPath,
     renameNode,
     moveNode,
-    fetchProject,
-    logDownload,
     getPreviewUrl
-} from '@/app/actions';
+} from '@/actions/node';
+import {
+    createShareLink,
+    getNodeShareLinks,
+    revokeShareLink
+} from '@/actions/share';
+import {
+    getMyRoleInProject,
+    fetchProject
+} from '@/actions/project';
+import {
+    logDownload
+} from '@/actions/log';
 import FilePreviewModal from '@/components/FilePreviewModal';
 import {
     FolderPlus, UploadCloud, Folder, File,

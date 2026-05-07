@@ -28,6 +28,17 @@ export async function logActivity(params: {
     }
 }
 
+export type ActivityLog = {
+    id: string;
+    project_id: string;
+    user_email: string;
+    action: string;
+    node_id: string | null;
+    node_name: string;
+    metadata: Record<string, unknown> | null;
+    created_at: string;
+};
+
 export async function logDownload(nodeId: string, nodeName: string, projectId: string | null) {
     if (!hasValidSupabaseEnv || !projectId) return;
     const supabaseServer = await createClient();
@@ -35,4 +46,20 @@ export async function logDownload(nodeId: string, nodeName: string, projectId: s
     if (user?.email) {
         await logActivity({ projectId, userEmail: user.email, action: 'download', nodeId, nodeName });
     }
+}
+
+export async function fetchProjectLogs(projectId: string): Promise<ActivityLog[]> {
+    if (!hasValidSupabaseEnv) return [];
+    const { data, error } = await (await createClient())
+        .from('share_log')
+        .select('*')
+        .eq('project_id', projectId)
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+    if (error) {
+        console.error('Error fetching project logs:', error);
+        return [];
+    }
+    return data as ActivityLog[];
 }

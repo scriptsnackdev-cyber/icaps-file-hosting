@@ -1,6 +1,6 @@
 import FileManager from '@/components/FileManager';
 import ProjectDashboard from '@/components/ProjectDashboard';
-import { fetchUserProjectsWithUsage } from '@/app/actions';
+import { fetchUserProjectsWithUsage } from '@/actions/project';
 import { Suspense } from 'react';
 import { createClient, createServiceClient } from '@/utils/supabase/server';
 import { hasValidSupabaseEnv } from '@/lib/supabase';

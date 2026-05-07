@@ -2,8 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { X, UploadCloud, DownloadCloud, Trash2, Edit2, MoveRight, Share2, FolderPlus, ExternalLink, RefreshCw, Activity } from 'lucide-react';
-import { fetchProjectLogs } from '@/app/actions';
-import type { ActivityLog } from '@/app/actions';
+import { fetchProjectLogs, type ActivityLog } from '@/actions/log';
 
 const ACTION_META: Record<string, { label: string; icon: React.ReactNode; color: string; bg: string }> = {
     upload: { label: 'Uploaded', icon: <UploadCloud size={14} />, color: '#34d399', bg: 'rgba(52,211,153,0.12)' },

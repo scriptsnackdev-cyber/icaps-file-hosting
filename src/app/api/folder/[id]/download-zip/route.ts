@@ -4,6 +4,7 @@ import { r2Client, R2_BUCKET } from '@/lib/r2';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
+import { isDescendant } from '@/actions/node';
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
     try {

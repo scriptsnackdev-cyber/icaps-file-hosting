@@ -7,7 +7,8 @@ import Image from 'next/image';
 import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 import { Folder, Clock, Trash2, ShieldCheck, Cloud, Plus, X, Pencil, Users, AlertTriangle, UserMinus, UserPlus, ChevronDown, ClipboardList } from 'lucide-react';
 import styles from '@/app/layout.module.css';
-import { createProject, renameProject, deleteProject, getProjectMembers, addProjectMember, updateProjectMemberRole, removeProjectMember, getWhitelistUsers } from '@/app/actions';
+import { createProject, renameProject, deleteProject, getProjectMembers, addProjectMember, updateProjectMemberRole, removeProjectMember } from '@/actions/project';
+import { getWhitelistUsers } from '@/actions/admin';
 import { useToast } from '@/components/Toast';
 import ActivityLogModal from '@/components/ActivityLogModal';
 
