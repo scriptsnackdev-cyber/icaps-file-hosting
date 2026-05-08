@@ -269,10 +269,34 @@ export async function deleteNode(id: string, r2_key: string | null = null) {
     if (!hasValidSupabaseEnv) return { success: true };
 
     const supabaseServer = await createClient();
+    const serviceClient = createServiceClient(); // Service client to bypass RLS for finding descendants
 
-    const { data: nodeInfo } = await supabaseServer.from('share_nodes').select('name, project_id').eq('id', id).single();
+    // 1. Get info about the node to be deleted
+    const { data: nodeInfo } = await supabaseServer.from('share_nodes').select('name, type, project_id').eq('id', id).single();
+    if (!nodeInfo) return { success: true };
 
-    if (r2_key && hasValidR2Env) {
+    // 2. Handle R2 deletion
+    if (nodeInfo.type === 'folder') {
+        // Find ALL nested files that have an R2 key
+        const { data: descendants } = await serviceClient
+            .rpc('get_all_descendants', { p_node_id: id });
+        
+        const filesWithKeys = (descendants || []).filter((n: any) => n.type === 'file' && n.r2_key);
+        
+        if (filesWithKeys.length > 0 && hasValidR2Env) {
+            for (const file of filesWithKeys) {
+                try {
+                    await r2Client.send(new DeleteObjectCommand({
+                        Bucket: R2_BUCKET,
+                        Key: file.r2_key
+                    }));
+                } catch (e) {
+                    console.error(`Failed to delete ${file.name} from R2`, e);
+                }
+            }
+        }
+    } else if (r2_key && hasValidR2Env) {
+        // Single file deletion
         try {
             await r2Client.send(new DeleteObjectCommand({
                 Bucket: R2_BUCKET,
@@ -283,6 +307,7 @@ export async function deleteNode(id: string, r2_key: string | null = null) {
         }
     }
 
+    // 3. Delete from DB (CASCADE should handle nested records)
     const { error } = await supabaseServer.from('share_nodes').delete().eq('id', id);
     if (error) throw new Error(error.message);
 

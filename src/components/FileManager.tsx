@@ -96,16 +96,35 @@ export default function FileManager() {
     const [isSharing, setIsSharing] = useState(false);
     const [generatedLink, setGeneratedLink] = useState('');
 
-    type TransferTask = { id: string, name: string, type: string, progress: number, status: 'running' | 'completed' | 'error' };
+    type TransferTask = {
+        id: string;
+        name: string;
+        type: string;
+        progress: number;
+        status: 'running' | 'completed' | 'error';
+        subCount?: number;
+        totalSubCount?: number;
+    };
     const [transfers, setTransfers] = useState<TransferTask[]>([]);
     const [showTransfers, setShowTransfers] = useState(false);
 
-    const addTransfer = (id: string, name: string, type: string) => {
-        setTransfers(prev => [{ id, name, type, progress: 0, status: 'running' }, ...prev]);
+    const addTransfer = (id: string, name: string, type: string, totalFiles?: number, totalFolders?: number) => {
+        setTransfers(prev => [{
+            id, name, type, progress: 0, status: 'running',
+            filesDone: totalFiles !== undefined ? 0 : undefined,
+            totalFiles,
+            foldersDone: totalFolders !== undefined ? 0 : undefined,
+            totalFolders
+        }, ...prev]);
         setShowTransfers(true);
     };
-    const updateTransfer = (id: string, progress: number) => {
-        setTransfers(prev => prev.map(t => t.id === id ? { ...t, progress } : t));
+    const updateTransfer = (id: string, progress: number, filesDone?: number, foldersDone?: number) => {
+        setTransfers(prev => prev.map(t => t.id === id ? {
+            ...t,
+            progress: progress === -1 ? t.progress : progress,
+            filesDone: filesDone !== undefined ? filesDone : t.filesDone,
+            foldersDone: foldersDone !== undefined ? foldersDone : t.foldersDone
+        } : t));
     };
     const completeTransfer = (id: string, status: 'completed' | 'error') => {
         setTransfers(prev => prev.map(t => t.id === id ? { ...t, progress: status === 'completed' ? 100 : t.progress, status } : t));
@@ -187,16 +206,46 @@ export default function FileManager() {
         return () => window.removeEventListener('click', handleClick);
     }, []);
 
+    // Warn before closing if uploading
+    useEffect(() => {
+        const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+            if (isUploading) {
+                e.preventDefault();
+                e.returnValue = ''; // Standard for showing the browser's native confirmation dialog
+            }
+        };
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    }, [isUploading]);
+
     const handleCreateFolder = async () => {
         if (!newFolderName.trim()) return;
         const projectId = searchParams?.get('projectId') || undefined;
+        const tempId = `temp-${Date.now()}`;
+        const newNode: DriveNode = {
+            id: tempId,
+            name: newFolderName,
+            type: 'folder',
+            parent_id: currentFolder.id,
+            size: null,
+            mime_type: null,
+            r2_key: null,
+            project_id: projectId || null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+        };
+
+        // Optimistic UI
+        setNodes(prev => [newNode, ...prev]);
+        setNewFolderName('');
+        setShowFolderModal(false);
+
         try {
-            await createFolderFolder(newFolderName, currentFolder.id, projectId);
-            setNewFolderName('');
-            setShowFolderModal(false);
+            await createFolderFolder(newNode.name, currentFolder.id, projectId);
             loadData();
         } catch (err) {
             console.error(err);
+            setNodes(prev => prev.filter(n => n.id !== tempId));
             showToast('Create folder failed', 'error');
         }
     };
@@ -206,13 +255,19 @@ export default function FileManager() {
             setRenameNodeData(null);
             return;
         }
+        const oldName = renameNodeData.name;
+        // Optimistic UI
+        setNodes(prev => prev.map(n => n.id === renameNodeData.id ? { ...n, name: editName } : n));
+        const targetId = renameNodeData.id;
+        setRenameNodeData(null);
+
         try {
-            await renameNode(renameNodeData.id, editName);
+            await renameNode(targetId, editName);
             showToast(`Renamed to ${editName}`, 'success');
-            setRenameNodeData(null);
             loadData();
         } catch (err) {
             console.error(err);
+            setNodes(prev => prev.map(n => n.id === targetId ? { ...n, name: oldName } : n));
             showToast('Rename failed', 'error');
         }
     };
@@ -504,90 +559,179 @@ export default function FileManager() {
         setPendingFolderUpload(null);
 
         setIsUploading(true);
+        const rootTaskId = `folder-up-${Date.now()}`;
+        const projectId = searchParams?.get('projectId') || undefined;
+
+        // --- PHASE 1: SCAN ---
+        const folderPathsSet = new Set<string>();
+        files.forEach(f => {
+            const parts = f.webkitRelativePath.split('/');
+            parts.pop(); // remove file name
+            let currentPath = '';
+            parts.forEach(p => {
+                currentPath = currentPath ? `${currentPath}/${p}` : p;
+                folderPathsSet.add(currentPath);
+            });
+        });
+        const folderPaths = Array.from(folderPathsSet).sort((a, b) => a.split('/').length - b.split('/').length);
+        
+        addTransfer(rootTaskId, folderName, 'upload', files.length, folderPaths.length);
+
         try {
             const folderCache = new Map<string, string | null>();
             folderCache.set('', currentFolder.id);
 
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                const parts = file.webkitRelativePath.split('/');
-                const fileName = parts.pop() || file.name;
-                const folderPath = parts.join('/');
-                const projectId = searchParams?.get('projectId') || undefined;
+            // --- PHASE 2: INFRASTRUCTURE (FOLDERS) ---
+            let foldersDone = 0;
+            for (const path of folderPaths) {
+                const parts = path.split('/');
+                const name = parts[parts.length - 1];
+                const parentPath = parts.slice(0, -1).join('/');
+                const parentId = folderCache.get(parentPath);
 
-                if (!folderCache.has(folderPath)) {
-                    const leafId = await ensurePathExists(parts, currentFolder.id, projectId);
-                    folderCache.set(folderPath, leafId);
-                }
+                const resId = await ensurePathExists([name], parentId || null, projectId);
+                folderCache.set(path, resId);
+                
+                foldersDone++;
+                updateTransfer(rootTaskId, -1, undefined, foldersDone);
+                // Refresh UI occasionally to show new folders
+                if (foldersDone % 5 === 0) loadData();
+            }
+            loadData(); // Final UI refresh for folders
 
-                const targetParentId = folderCache.get(folderPath);
+            // --- PHASE 3: FILLING (FILES) ---
+            let filesDone = 0;
+            const sortedFiles = [...files].sort((a, b) => a.webkitRelativePath.localeCompare(b.webkitRelativePath));
 
-                const mimeType = file.type || 'application/octet-stream';
-                const signRes = await fetch('/api/upload/sign', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        fileName,
-                        contentType: mimeType,
-                        projectId,
-                        parentId: targetParentId || null
-                    })
-                });
+            const TOTAL_WORKER_LIMIT = 12;
+            const LARGE_FILE_LIMIT = 3;
+            let activeLargeUploads = 0;
+            let fileIndex = 0;
 
-                if (!signRes.ok) throw new Error('Failed to get signed URL');
-                const { uploadUrl, key } = await signRes.json();
+            const uploadWorker = async () => {
+                while (fileIndex < sortedFiles.length) {
+                    // Find the next available file based on large file constraints
+                    let targetIndex = -1;
+                    
+                    for (let i = fileIndex; i < sortedFiles.length; i++) {
+                        const isLarge = sortedFiles[i].size >= 5 * 1024 * 1024;
+                        if (!isLarge || (isLarge && activeLargeUploads < LARGE_FILE_LIMIT)) {
+                            // Check if this file is already being processed by another worker
+                            // (We'll use a temporary property to mark files as 'taken')
+                            if (!(sortedFiles[i] as any)._processing) {
+                                targetIndex = i;
+                                break;
+                            }
+                        }
+                    }
 
-                const taskId = `up-${Date.now()}-${i}`;
-                addTransfer(taskId, `Uploading ${fileName}`, 'upload');
+                    if (targetIndex === -1) {
+                        // No suitable file at the moment (e.g. only large files left but limit reached)
+                        // Wait a bit and try again
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                        continue;
+                    }
 
-                if (uploadUrl !== 'mock-url') {
+                    const file = sortedFiles[targetIndex];
+                    (file as any)._processing = true;
+                    const isLarge = file.size >= 5 * 1024 * 1024;
+                    if (isLarge) activeLargeUploads++;
+
+                    const parts = file.webkitRelativePath.split('/');
+                    const fileName = parts.pop() || file.name;
+                    const folderPath = parts.join('/');
+                    const targetParentId = folderCache.get(folderPath);
+                    const mimeType = file.type || 'application/octet-stream';
+
                     try {
-                        await new Promise<void>((resolve, reject) => {
-                            const xhr = new XMLHttpRequest();
-                            xhr.upload.onprogress = (ev) => {
-                                if (ev.lengthComputable) {
-                                    updateTransfer(taskId, Math.round((ev.loaded / ev.total) * 100));
-                                }
-                            };
-                            xhr.onload = () => {
-                                if (xhr.status >= 200 && xhr.status < 300) resolve();
-                                else reject(new Error(`Upload failed with status ${xhr.status}`));
-                            };
-                            xhr.onerror = () => reject(new Error('Network error during upload'));
-                            xhr.open('PUT', uploadUrl);
-                            xhr.setRequestHeader('Content-Type', mimeType);
-                            xhr.send(file);
+                        const signRes = await fetch('/api/upload/sign', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ fileName, contentType: mimeType, projectId, parentId: targetParentId || null })
                         });
-                        completeTransfer(taskId, 'completed');
+
+                        if (signRes.ok) {
+                            const { uploadUrl, key } = await signRes.json();
+                            if (uploadUrl !== 'mock-url') {
+                                await new Promise<void>((resolve, reject) => {
+                                    const xhr = new XMLHttpRequest();
+                                    xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error('Fail')));
+                                    xhr.onerror = () => reject(new Error('Net error'));
+                                    xhr.open('PUT', uploadUrl);
+                                    xhr.setRequestHeader('Content-Type', mimeType);
+                                    xhr.send(file);
+                                });
+                            }
+                            await saveFileRecord(fileName, key, file.size, mimeType, targetParentId || null, projectId);
+                            
+                            if (targetParentId === currentFolder.id) {
+                                const newNode: DriveNode = {
+                                    id: `temp-f-${Date.now()}-${Math.random()}`,
+                                    name: fileName,
+                                    type: 'file',
+                                    parent_id: targetParentId,
+                                    size: file.size,
+                                    mime_type: mimeType,
+                                    r2_key: key,
+                                    project_id: projectId || null,
+                                    created_at: new Date().toISOString(),
+                                    updated_at: new Date().toISOString()
+                                };
+                                setNodes(prev => [newNode, ...prev]);
+                            }
+                        }
                     } catch (e) {
-                        completeTransfer(taskId, 'error');
-                        throw new Error("Folder Chunk failed");
+                        console.error(`Failed to upload ${fileName}`, e);
+                    } finally {
+                        if (isLarge) activeLargeUploads--;
+                        filesDone++;
+                        // Move the global fileIndex pointer forward if we can
+                        while (fileIndex < sortedFiles.length && (sortedFiles[fileIndex] as any)._done) {
+                            fileIndex++;
+                        }
+                        // Mark as done
+                        (file as any)._done = true;
+                        const overallProgress = Math.round(((foldersDone + filesDone) / (folderPaths.length + files.length)) * 100);
+                        updateTransfer(rootTaskId, overallProgress, filesDone);
                     }
                 }
+            };
 
-                await saveFileRecord(fileName, key, file.size, mimeType, targetParentId || null, projectId);
+            // Start workers
+            const workers = [];
+            for (let i = 0; i < Math.min(TOTAL_WORKER_LIMIT, sortedFiles.length); i++) {
+                workers.push(uploadWorker());
             }
-            showToast('Folder upload completed', 'success');
-            loadData();
+            await Promise.all(workers);
+
+            completeTransfer(rootTaskId, 'completed');
+            showToast('Folder upload successful', 'success');
         } catch (err) {
             console.error(err);
+            completeTransfer(rootTaskId, 'error');
             showToast('Folder upload failed', 'error');
         } finally {
             setIsUploading(false);
             if (folderInputRef.current) folderInputRef.current.value = '';
+            loadData();
         }
     };
 
     const handleDelete = async (e: React.MouseEvent, node: DriveNode) => {
         e.stopPropagation();
         showConfirm(`Are you sure you want to delete ${node.name}?`, async () => {
+            const oldNodes = [...nodes];
+            // Optimistic UI
+            setNodes(prev => prev.filter(n => n.id !== node.id));
+            setSelectedIds(prev => { const n = new Set(prev); n.delete(node.id); return n; });
+
             try {
                 await deleteNode(node.id, node.r2_key);
-                loadData();
                 showToast(`Deleted ${node.name}`, 'success');
-                setSelectedIds(prev => { const n = new Set(prev); n.delete(node.id); return n; });
+                loadData();
             } catch (err) {
                 console.error(err);
+                setNodes(oldNodes);
                 showToast('Delete failed', 'error');
             }
         });
@@ -1338,17 +1482,41 @@ export default function FileManager() {
                     </div>
                     <div style={{ maxHeight: '280px', overflowY: 'auto' }}>
                         {transfers.map(task => (
-                            <div key={task.id} style={{ padding: '10px 16px', borderBottom: '1px solid var(--border-soft)' }}>
-                                <div style={{ fontSize: '0.825rem', marginBottom: '7px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'var(--text-primary)', fontWeight: 500 }}>
-                                    {task.name}
+                            <div key={task.id} style={{ padding: '10px 16px', borderBottom: '1px solid var(--border-soft)', animation: 'fadeIn 0.2s ease-out' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                                    <div style={{ fontSize: '0.825rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'var(--text-primary)', fontWeight: 600, flex: 1 }}>
+                                        {task.name}
+                                    </div>
+                                    {task.totalFiles !== undefined && (
+                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 600, marginLeft: '10px', background: 'var(--bg-hover)', padding: '2px 8px', borderRadius: 'var(--r-full)' }}>
+                                            {task.filesDone}/{task.totalFiles} Files, {task.foldersDone}/{task.totalFolders} Folders
+                                        </div>
+                                    )}
                                 </div>
+                                
                                 {task.status === 'running' && (
-                                    <div style={{ height: '4px', background: 'var(--bg-elevated)', borderRadius: '2px', overflow: 'hidden' }}>
-                                        <div style={{ height: '100%', background: 'linear-gradient(90deg, var(--brand-start), var(--brand-end))', width: `${Math.max(5, task.progress)}%`, transition: 'width 0.3s ease' }} />
+                                    <>
+                                        <div style={{ height: '4px', background: 'var(--bg-elevated)', borderRadius: '2px', overflow: 'hidden', marginBottom: '4px' }}>
+                                            <div style={{ height: '100%', background: 'linear-gradient(90deg, var(--brand-start), var(--brand-end))', width: `${Math.max(3, task.progress)}%`, transition: 'width 0.4s cubic-bezier(0.4, 0, 0.2, 1)' }} />
+                                        </div>
+                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between' }}>
+                                            <span>{task.type === 'upload' ? 'Uploading...' : 'Downloading...'}</span>
+                                            <span>{task.progress}%</span>
+                                        </div>
+                                    </>
+                                )}
+                                {task.status === 'completed' && (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--success-text)' }} />
+                                        <div style={{ fontSize: '0.78rem', color: 'var(--success-text)', fontWeight: 600 }}>Completed</div>
                                     </div>
                                 )}
-                                {task.status === 'completed' && <div style={{ fontSize: '0.78rem', color: 'var(--success-text)', fontWeight: 600 }}>✓ Completed</div>}
-                                {task.status === 'error' && <div style={{ fontSize: '0.78rem', color: 'var(--error-text)', fontWeight: 600 }}>✕ Failed</div>}
+                                {task.status === 'error' && (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--error-text)' }} />
+                                        <div style={{ fontSize: '0.78rem', color: 'var(--error-text)', fontWeight: 600 }}>Failed</div>
+                                    </div>
+                                )}
                             </div>
                         ))}
                     </div>

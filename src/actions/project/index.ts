@@ -130,10 +130,39 @@ export async function renameProject(projectId: string, newName: string) {
     return { success: true };
 }
 
+import { r2Client, R2_BUCKET, hasValidR2Env } from '@/lib/r2';
+import { DeleteObjectCommand } from '@aws-sdk/client-s3';
+
 export async function deleteProject(projectId: string) {
     if (!hasValidSupabaseEnv) return { success: true };
-    const { error } = await (await createClient()).from('share_projects').delete().eq('id', projectId);
+    const supabaseServer = await createClient();
+    const serviceClient = createServiceClient();
+
+    // 1. Find all files in this project that have R2 keys
+    const { data: projectFiles } = await serviceClient
+        .from('share_nodes')
+        .select('name, r2_key')
+        .eq('project_id', projectId)
+        .eq('type', 'file')
+        .not('r2_key', 'is', null);
+
+    if (projectFiles && projectFiles.length > 0 && hasValidR2Env) {
+        for (const file of projectFiles) {
+            try {
+                await r2Client.send(new DeleteObjectCommand({
+                    Bucket: R2_BUCKET,
+                    Key: file.r2_key!
+                }));
+            } catch (e) {
+                console.error(`Failed to delete ${file.name} from R2 during project cleanup`, e);
+            }
+        }
+    }
+
+    // 2. Delete project (cascades to members and nodes)
+    const { error } = await supabaseServer.from('share_projects').delete().eq('id', projectId);
     if (error) throw new Error(error.message);
+    
     revalidatePath('/');
     return { success: true };
 }
