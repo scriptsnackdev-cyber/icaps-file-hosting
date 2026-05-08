@@ -73,6 +73,8 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
 
     const uploadFolder = async (filesList: FileList, folderName: string, currentFolderId: string, projectId?: string, onComplete?: () => void) => {
         const files = Array.from(filesList);
+        if (files.length === 0) return;
+
         setIsUploading(true);
         activeUploadsCount.current++;
         const rootTaskId = `folder-up-${Date.now()}`;
@@ -80,13 +82,16 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
         // --- PHASE 1: SCAN ---
         const folderPathsSet = new Set<string>();
         files.forEach(f => {
-            const parts = (f as any).webkitRelativePath.split('/');
-            parts.pop();
-            let currentPath = '';
-            parts.forEach((p: string) => {
-                currentPath = currentPath ? `${currentPath}/${p}` : p;
-                folderPathsSet.add(currentPath);
-            });
+            const relPath = (f as any).webkitRelativePath || f.name;
+            const parts = relPath.split('/');
+            if (parts.length > 1) {
+                parts.pop();
+                let currentPath = '';
+                parts.forEach((p: string) => {
+                    currentPath = currentPath ? `${currentPath}/${p}` : p;
+                    folderPathsSet.add(currentPath);
+                });
+            }
         });
         const folderPaths = Array.from(folderPathsSet).sort((a, b) => a.split('/').length - b.split('/').length);
         
@@ -101,37 +106,48 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
 
             // --- PHASE 3: FILLING (FILES) ---
             let filesDone = 0;
-            const sortedFiles = [...files].sort((a, b) => (a as any).webkitRelativePath.localeCompare((b as any).webkitRelativePath));
+            const sortedFiles = [...files].sort((a, b) => {
+                const pathA = (a as any).webkitRelativePath || a.name;
+                const pathB = (b as any).webkitRelativePath || b.name;
+                return pathA.localeCompare(pathB);
+            });
 
-            const TOTAL_WORKER_LIMIT = 12;
-            const LARGE_FILE_LIMIT = 3;
+            const TOTAL_WORKER_LIMIT = 8;
+            const LARGE_FILE_LIMIT = 2;
             let activeLargeUploads = 0;
-            let fileIndex = 0;
 
             const uploadWorker = async () => {
-                while (fileIndex < sortedFiles.length) {
+                while (true) {
                     let targetIndex = -1;
-                    for (let i = fileIndex; i < sortedFiles.length; i++) {
-                        const isLarge = sortedFiles[i].size >= 5 * 1024 * 1024;
+                    
+                    // Find next available file
+                    for (let i = 0; i < sortedFiles.length; i++) {
+                        const f = sortedFiles[i];
+                        if ((f as any)._processing || (f as any)._done) continue;
+                        
+                        const isLarge = f.size >= 5 * 1024 * 1024;
                         if (!isLarge || (isLarge && activeLargeUploads < LARGE_FILE_LIMIT)) {
-                            if (!(sortedFiles[i] as any)._processing) {
-                                targetIndex = i;
-                                break;
-                            }
+                            targetIndex = i;
+                            (f as any)._processing = true;
+                            break;
                         }
                     }
 
                     if (targetIndex === -1) {
-                        await new Promise(resolve => setTimeout(resolve, 100));
+                        // Check if any files are left to be picked up
+                        const anyLeft = sortedFiles.some(f => !(f as any)._processing && !(f as any)._done);
+                        if (!anyLeft) break; // All files are either processing or done
+                        
+                        await new Promise(resolve => setTimeout(resolve, 200));
                         continue;
                     }
 
                     const file = sortedFiles[targetIndex];
-                    (file as any)._processing = true;
                     const isLarge = file.size >= 5 * 1024 * 1024;
                     if (isLarge) activeLargeUploads++;
 
-                    const parts = (file as any).webkitRelativePath.split('/');
+                    const relPath = (file as any).webkitRelativePath || file.name;
+                    const parts = relPath.split('/');
                     const fileName = parts.pop() || file.name;
                     const folderPath = parts.join('/');
                     const targetParentId = folderCache.get(folderPath);
@@ -162,8 +178,8 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
                         console.error(`Failed to upload ${fileName}`, e);
                     } finally {
                         if (isLarge) activeLargeUploads--;
-                        filesDone++;
                         (file as any)._done = true;
+                        filesDone++;
                         const overallProgress = Math.round(((folderPaths.length + filesDone) / (folderPaths.length + files.length)) * 100);
                         updateTransfer(rootTaskId, overallProgress, filesDone);
                     }
@@ -171,7 +187,8 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
             };
 
             const workers = [];
-            for (let i = 0; i < Math.min(TOTAL_WORKER_LIMIT, sortedFiles.length); i++) {
+            const workerCount = Math.min(TOTAL_WORKER_LIMIT, sortedFiles.length);
+            for (let i = 0; i < workerCount; i++) {
                 workers.push(uploadWorker());
             }
             await Promise.all(workers);

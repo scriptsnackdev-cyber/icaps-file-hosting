@@ -531,7 +531,9 @@ export default function FileManager() {
         if (!files || files.length === 0) return;
 
         const fileArray = Array.from(files);
-        const folderName = fileArray[0].webkitRelativePath.split('/')[0] || 'New Folder';
+        // Safely extract folder name from webkitRelativePath or fallback
+        const firstPath = fileArray[0].webkitRelativePath;
+        const folderName = firstPath ? firstPath.split('/')[0] : 'New Folder';
         const totalSize = fileArray.reduce((acc, f) => acc + f.size, 0);
 
         setPendingFolderUpload({
@@ -546,10 +548,19 @@ export default function FileManager() {
         const { files, folderName } = pendingFolderUpload;
         const projectId = searchParams?.get('projectId') || undefined;
         setPendingFolderUpload(null);
+        setIsUploading(true);
 
-        await uploadFolder(files as any, folderName, currentFolder.id || '', projectId, () => {
-            loadData(currentFolder.id, undefined, false, true);
-        });
+        try {
+            await uploadFolder(files as any, folderName, currentFolder.id || '', projectId, () => {
+                loadData(currentFolder.id, undefined, false, true);
+            });
+        } catch (err) {
+            console.error('Folder upload failed:', err);
+            showToast('Folder upload failed', 'error');
+        } finally {
+            setIsUploading(false);
+            if (folderInputRef.current) folderInputRef.current.value = '';
+        }
     };
 
 
@@ -878,7 +889,8 @@ export default function FileManager() {
                             ref={folderInputRef}
                             className={styles.fileInput}
                             onChange={handleFolderUpload}
-                            {...{ webkitdirectory: 'true', directory: 'true' } as React.InputHTMLAttributes<HTMLInputElement>}
+                            webkitdirectory=""
+                            directory=""
                             multiple
                         />
 
