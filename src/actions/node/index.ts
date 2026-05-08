@@ -7,6 +7,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createClient, createServiceClient } from '@/utils/supabase/server';
 import { revalidatePath } from 'next/cache';
 import { logActivity } from '@/actions/log';
+import { DeleteObjectCommand, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 
 // MOCK DATA GENERATOR
 function getMockData() {
@@ -265,7 +266,6 @@ export async function getPreviewUrl(r2_key: string, mimeType: string) {
     return url;
 }
 
-import { DeleteObjectCommand, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 
 export async function deleteNode(id: string, r2_key: string | null = null) {
     if (!hasValidSupabaseEnv) return { success: true };

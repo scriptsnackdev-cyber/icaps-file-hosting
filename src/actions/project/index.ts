@@ -3,6 +3,8 @@
 import { createClient, createServiceClient } from '@/utils/supabase/server';
 import { hasValidSupabaseEnv } from '@/lib/supabase';
 import { revalidatePath } from 'next/cache';
+import { r2Client, R2_BUCKET, hasValidR2Env } from '@/lib/r2';
+import { DeleteObjectsCommand } from '@aws-sdk/client-s3';
 
 export async function fetchUserProjects(): Promise<{ id: string; name: string; userRole: string | null }[]> {
     if (!hasValidSupabaseEnv) return [{ id: 'mock', name: 'Mock Project', userRole: 'admin' }];
@@ -130,8 +132,6 @@ export async function renameProject(projectId: string, newName: string) {
     return { success: true };
 }
 
-import { r2Client, R2_BUCKET, hasValidR2Env } from '@/lib/r2';
-import { DeleteObjectsCommand } from '@aws-sdk/client-s3';
 
 export async function deleteProject(projectId: string) {
     if (!hasValidSupabaseEnv) return { success: true };
