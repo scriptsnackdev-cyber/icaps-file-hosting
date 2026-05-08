@@ -83,7 +83,7 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
             const parts = (f as any).webkitRelativePath.split('/');
             parts.pop();
             let currentPath = '';
-            parts.forEach(p => {
+            parts.forEach((p: string) => {
                 currentPath = currentPath ? `${currentPath}/${p}` : p;
                 folderPathsSet.add(currentPath);
             });
