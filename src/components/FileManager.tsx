@@ -9,12 +9,10 @@ import {
     saveFileRecord,
     deleteNode,
     getDownloadUrl,
-    ensureMultiplePathsExist,
     fetchRecentNodes,
     getFolderPath,
     renameNode,
     moveNode,
-    getPreviewUrl
 } from '@/actions/node';
 import {
     createShareLink,
@@ -46,7 +44,7 @@ export default function FileManager() {
     const searchParams = useSearchParams();
     const router = useRouter();
     const { showToast, showConfirm } = useToast();
-    const { uploadFolder, addTransfer, updateTransfer, completeTransfer, isUploading: globalUploading } = useTransfer();
+    const { uploadFolder, addTransfer, updateTransfer, completeTransfer } = useTransfer();
     const [isUploading, setIsUploading] = useState(false);
     const [projectRole, setProjectRole] = useState<'admin' | 'member' | 'read_only'>('read_only');
     const [projectName, setProjectName] = useState('Workspace');
@@ -172,7 +170,7 @@ export default function FileManager() {
             setFolderHistory(newHistory);
             setCurrentFolder(lastFolder);
             loadData(lastFolder.id, undefined, false);
-            
+
             const projectId = searchParams?.get('projectId') || null;
             const newUrl = lastFolder.id ? `/?folderId=${lastFolder.id}${projectId ? `&projectId=${projectId}` : ''}` : `/${projectId ? `?projectId=${projectId}` : ''}`;
             window.history.pushState(null, '', newUrl);
@@ -331,8 +329,11 @@ export default function FileManager() {
                 xhr.upload.onprogress = (ev) => {
                     if (ev.lengthComputable) updateTransfer(taskId, Math.round((ev.loaded / ev.total) * 100));
                 };
-                xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`Upload failed ${xhr.status}`))),
-                    xhr.onerror = () => reject(new Error('Network error'));
+                xhr.onload = () => {
+                    if (xhr.status >= 200 && xhr.status < 300) resolve();
+                    else reject(new Error(`Upload failed ${xhr.status}`));
+                };
+                xhr.onerror = () => reject(new Error('Network error'));
                 xhr.open('PUT', uploadUrl);
                 xhr.setRequestHeader('Content-Type', mimeType);
                 xhr.send(file);
@@ -632,71 +633,6 @@ export default function FileManager() {
         window.history.pushState(null, '', newUrl);
     };
 
-    const goBack = () => {
-        const prev = folderHistory.pop();
-        if (!prev) return;
-        setFolderHistory([...folderHistory]);
-        setCurrentFolder(prev);
-
-        const projectId = searchParams?.get('projectId') || null;
-        loadData(prev.id || null, undefined, false);
-        lastUrlState.current = { projectId, folderId: prev.id, search: null, recent: false };
-
-        const newUrl = prev.id ? `/?folderId=${prev.id}${projectId ? `&projectId=${projectId}` : ''}` : `/${projectId ? `?projectId=${projectId}` : ''}`;
-        window.history.pushState(null, '', newUrl);
-    };
-
-    const handleDownload = async (e: React.MouseEvent, node: DriveNode) => {
-        e.stopPropagation();
-        if (node.type !== 'file' || !node.r2_key) return;
-
-        try {
-            const url = await getDownloadUrl(node.r2_key, node.name);
-            if (url === 'https://example.com/mock-download') {
-                showToast('R2 is not configured. Returning mock download.', 'info');
-                return;
-            }
-
-            const taskId = `dl-${Date.now()}`;
-            addTransfer(taskId, `Downloading ${node.name}`, 'download');
-
-            const xhr = new XMLHttpRequest();
-            xhr.responseType = 'blob';
-            xhr.onprogress = (ev) => {
-                if (ev.lengthComputable) {
-                    updateTransfer(taskId, Math.round((ev.loaded / ev.total) * 100));
-                } else {
-                    // simulate fake progress for indeterminate
-                    updateTransfer(taskId, -2);
-                }
-            };
-            xhr.onload = () => {
-                if (xhr.status < 300) {
-                    const blobUrl = URL.createObjectURL(xhr.response);
-                    const a = document.createElement('a');
-                    a.href = blobUrl;
-                    a.download = node.name;
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-                    URL.revokeObjectURL(blobUrl);
-                    completeTransfer(taskId, 'completed');
-                    // Fire-and-forget log
-                    const projectId = searchParams?.get('projectId') || null;
-                    logDownload(node.id, node.name, projectId);
-                } else {
-                    completeTransfer(taskId, 'error');
-                }
-            };
-            xhr.onerror = () => completeTransfer(taskId, 'error');
-            xhr.open('GET', url);
-            xhr.send();
-        } catch (err) {
-            console.error("Download fail", err);
-            showToast('Download Failed', 'error');
-        }
-    };
-
     const handleDownloadFolder = async (e: React.MouseEvent, node: DriveNode) => {
         e.stopPropagation();
         if (node.type !== 'folder') return;
@@ -730,6 +666,10 @@ export default function FileManager() {
             return;
         }
 
+        if (!node.r2_key) {
+            showToast('File has no download key.', 'error');
+            return;
+        }
         try {
             const url = await getDownloadUrl(node.r2_key, node.name);
             if (url === 'https://example.com/mock-download') {
@@ -760,7 +700,7 @@ export default function FileManager() {
                     a.remove();
                     URL.revokeObjectURL(blobUrl);
                     completeTransfer(taskId, 'completed');
-                    
+
                     const projectId = searchParams?.get('projectId') || null;
                     logDownload(node.id, node.name, projectId);
                 } else {
@@ -935,12 +875,11 @@ export default function FileManager() {
                         </button>
                         <input
                             type="file"
-                            webkitdirectory="true"
-                            directory="true"
-                            multiple
                             ref={folderInputRef}
                             className={styles.fileInput}
                             onChange={handleFolderUpload}
+                            {...{ webkitdirectory: 'true', directory: 'true' } as React.InputHTMLAttributes<HTMLInputElement>}
+                            multiple
                         />
 
                         <button
