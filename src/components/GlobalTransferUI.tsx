@@ -106,12 +106,12 @@ export default function GlobalTransferUI() {
                                         }} />
                                     </div>
                                     <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between' }}>
-                                        <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                            <Loader2 size={10} className="animate-spin" />
-                                            {task.type === 'upload' ? 'Uploading...' : 'Downloading...'}
-                                        </span>
-                                        <span>{task.progress}%</span>
-                                    </div>
+                                         <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                             <Loader2 size={10} className="animate-spin" />
+                                             {task.message || (task.type === 'upload' ? 'Uploading...' : 'Downloading...')}
+                                         </span>
+                                         <span>{task.progress}%</span>
+                                     </div>
                                 </>
                             )}
                             

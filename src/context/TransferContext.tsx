@@ -10,6 +10,7 @@ export type TransferTask = {
     type: string;
     progress: number;
     status: 'running' | 'completed' | 'error';
+    message?: string;
     filesDone?: number;
     totalFiles?: number;
     foldersDone?: number;
@@ -23,7 +24,7 @@ type TransferContextType = {
     isUploading: boolean;
     uploadFolder: (files: FileList, folderName: string, currentFolderId: string, projectId?: string, onComplete?: () => void) => Promise<void>;
     addTransfer: (id: string, name: string, type: string, totalFiles?: number, totalFolders?: number) => void;
-    updateTransfer: (id: string, progress: number, filesDone?: number, foldersDone?: number) => void;
+    updateTransfer: (id: string, progress: number, filesDone?: number, foldersDone?: number, message?: string) => void;
     completeTransfer: (id: string, status: 'completed' | 'error') => void;
 };
 
@@ -46,12 +47,13 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
         setShowTransfers(true);
     };
 
-    const updateTransfer = (id: string, progress: number, filesDone?: number, foldersDone?: number) => {
+    const updateTransfer = (id: string, progress: number, filesDone?: number, foldersDone?: number, message?: string) => {
         setTransfers(prev => prev.map(t => t.id === id ? {
             ...t,
             progress: progress === -2 ? Math.min(95, t.progress + 5) : (progress === -1 ? t.progress : progress),
             filesDone: filesDone !== undefined ? filesDone : t.filesDone,
-            foldersDone: foldersDone !== undefined ? foldersDone : t.foldersDone
+            foldersDone: foldersDone !== undefined ? foldersDone : t.foldersDone,
+            message: message !== undefined ? message : t.message
         } : t));
     };
 
@@ -96,13 +98,14 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
         const folderPaths = Array.from(folderPathsSet).sort((a, b) => a.split('/').length - b.split('/').length);
         
         addTransfer(rootTaskId, folderName, 'upload', files.length, folderPaths.length);
+        updateTransfer(rootTaskId, 0, undefined, undefined, 'Preparing folder structure...');
 
         try {
             // --- PHASE 2: INFRASTRUCTURE (FOLDERS) ---
             const pathMap = await ensureMultiplePathsExist(folderPaths, currentFolderId, projectId);
             const folderCache = new Map<string, string | null>();
             Object.entries(pathMap).forEach(([path, id]) => folderCache.set(path, id || null));
-            updateTransfer(rootTaskId, -1, undefined, folderPaths.length);
+            updateTransfer(rootTaskId, 5, undefined, folderPaths.length, `Creating files (0/${files.length})...`);
 
             // --- PHASE 3: FILLING (FILES) ---
             let filesDone = 0;
@@ -112,11 +115,14 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
                 return pathA.localeCompare(pathB);
             });
 
-            const TOTAL_WORKER_LIMIT = 8;
+            const TOTAL_WORKER_LIMIT = 6;
             const LARGE_FILE_LIMIT = 2;
             let activeLargeUploads = 0;
 
-            const uploadWorker = async () => {
+            const uploadWorker = async (index: number) => {
+                // Stagger starts slightly
+                await new Promise(resolve => setTimeout(resolve, index * 100));
+
                 while (true) {
                     let targetIndex = -1;
                     
@@ -134,10 +140,8 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
                     }
 
                     if (targetIndex === -1) {
-                        // Check if any files are left to be picked up
                         const anyLeft = sortedFiles.some(f => !(f as any)._processing && !(f as any)._done);
-                        if (!anyLeft) break; // All files are either processing or done
-                        
+                        if (!anyLeft) break;
                         await new Promise(resolve => setTimeout(resolve, 200));
                         continue;
                     }
@@ -173,6 +177,9 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
                                 });
                             }
                             await saveFileRecord(fileName, key, file.size, mimeType, targetParentId || null, projectId);
+                        } else {
+                            const errData = await signRes.json().catch(() => ({}));
+                            console.error(`Sign failed for ${fileName}:`, errData);
                         }
                     } catch (e) {
                         console.error(`Failed to upload ${fileName}`, e);
@@ -181,7 +188,7 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
                         (file as any)._done = true;
                         filesDone++;
                         const overallProgress = Math.round(((folderPaths.length + filesDone) / (folderPaths.length + files.length)) * 100);
-                        updateTransfer(rootTaskId, overallProgress, filesDone);
+                        updateTransfer(rootTaskId, overallProgress, filesDone, undefined, `Uploading (${filesDone}/${files.length})...`);
                     }
                 }
             };
@@ -189,7 +196,7 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
             const workers = [];
             const workerCount = Math.min(TOTAL_WORKER_LIMIT, sortedFiles.length);
             for (let i = 0; i < workerCount; i++) {
-                workers.push(uploadWorker());
+                workers.push(uploadWorker(i));
             }
             await Promise.all(workers);
 

@@ -102,17 +102,26 @@ export async function createFolderFolder(name: string, parentId: string | null =
 }
 
 export async function ensureMultiplePathsExist(folderPaths: string[], rootId: string | null = null, projectId?: string): Promise<Record<string, string>> {
-    if (!hasValidSupabaseEnv) return {};
+    if (!hasValidSupabaseEnv || folderPaths.length === 0) return { '': rootId || '' };
     const supabaseServer = await createClient();
     
+    // Sort paths by depth to ensure parent folders are created before children
     const sortedPaths = [...folderPaths].sort((a, b) => a.split('/').length - b.split('/').length);
     const pathMap: Record<string, string> = { '': rootId || '' };
+
+    // Optimization: Fetch all folders in this project/parent once to minimize queries
+    // We can't easily fetch everything at once if it's deeply nested and we don't know the full tree,
+    // but we can at least fetch the first level or use a recursive query if needed.
+    // For now, let's just make it more robust.
 
     for (const path of sortedPaths) {
         const parts = path.split('/');
         const folderName = parts.pop()!;
         const parentPath = parts.join('/');
         const parentId = pathMap[parentPath] || rootId;
+
+        // Ensure parentId is a valid UUID or null
+        const cleanParentId = (parentId && parentId.length > 10) ? parentId : null;
 
         let query = supabaseServer
             .from('share_nodes')
@@ -123,10 +132,10 @@ export async function ensureMultiplePathsExist(folderPaths: string[], rootId: st
         if (projectId) query = query.eq('project_id', projectId);
         else query = query.is('project_id', null);
 
-        if (parentId) query = query.eq('parent_id', parentId);
+        if (cleanParentId) query = query.eq('parent_id', cleanParentId);
         else query = query.is('parent_id', null);
 
-        const { data: existing } = await query.maybeSingle();
+        const { data: existing, error: queryError } = await query.maybeSingle();
 
         if (existing) {
             pathMap[path] = existing.id;
@@ -136,13 +145,16 @@ export async function ensureMultiplePathsExist(folderPaths: string[], rootId: st
                 .insert([{
                     name: folderName,
                     type: 'folder',
-                    parent_id: parentId || null,
+                    parent_id: cleanParentId,
                     project_id: projectId || null
                 }])
                 .select('id')
                 .single();
 
-            if (error || !created) throw new Error('Failed to create folder ' + folderName);
+            if (error || !created) {
+                console.error('Folder creation error:', error);
+                throw new Error('Failed to create folder ' + folderName);
+            }
             pathMap[path] = created.id;
         }
     }
