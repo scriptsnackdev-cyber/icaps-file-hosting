@@ -579,26 +579,18 @@ export default function FileManager() {
         addTransfer(rootTaskId, folderName, 'upload', files.length, folderPaths.length);
 
         try {
+            // --- PHASE 2: INFRASTRUCTURE (FOLDERS) - BATCHED ---
+            updateTransfer(rootTaskId, -1, undefined, 0);
+            const pathMap = await ensureMultiplePathsExist(folderPaths, currentFolder.id, projectId);
+            
+            // Map the simple folderCache to the returned pathMap
             const folderCache = new Map<string, string | null>();
-            folderCache.set('', currentFolder.id);
-
-            // --- PHASE 2: INFRASTRUCTURE (FOLDERS) ---
-            let foldersDone = 0;
-            for (const path of folderPaths) {
-                const parts = path.split('/');
-                const name = parts[parts.length - 1];
-                const parentPath = parts.slice(0, -1).join('/');
-                const parentId = folderCache.get(parentPath);
-
-                const resId = await ensurePathExists([name], parentId || null, projectId);
-                folderCache.set(path, resId);
-                
-                foldersDone++;
-                updateTransfer(rootTaskId, -1, undefined, foldersDone);
-                // Refresh UI occasionally to show new folders
-                if (foldersDone % 5 === 0) loadData();
-            }
-            loadData(); // Final UI refresh for folders
+            Object.entries(pathMap).forEach(([path, id]) => {
+                folderCache.set(path, id || null);
+            });
+            
+            updateTransfer(rootTaskId, -1, undefined, folderPaths.length);
+            loadData(currentFolder.id, undefined, false, true);
 
             // --- PHASE 3: FILLING (FILES) ---
             let filesDone = 0;

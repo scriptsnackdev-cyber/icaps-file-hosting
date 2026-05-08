@@ -8,49 +8,25 @@ import { createClient, createServiceClient } from '@/utils/supabase/server';
 import { revalidatePath } from 'next/cache';
 import { logActivity } from '@/actions/log';
 
-// MOCK DATA GENERATOR
-function getMockData() {
-    return [
-        { id: '1', name: 'Project Alpha', type: 'folder', parent_id: null, size: 4500123, mime_type: null, r2_key: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-        { id: '2', name: 'Financial Reports', type: 'folder', parent_id: null, size: 210456, mime_type: null, r2_key: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-        { id: '3', name: 'Q3_Earnings_Presentation.pptx', type: 'file', parent_id: null, size: 4500123, mime_type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', r2_key: 'mock-123', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-        { id: '4', name: 'employee_handbook.pdf', type: 'file', parent_id: null, size: 210456, mime_type: 'application/pdf', r2_key: 'mock-456', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-    ] as DriveNode[];
-}
-
 export async function fetchNodes(parentId: string | null = null, searchQuery?: string, projectId?: string): Promise<DriveNode[]> {
-    if (!hasValidSupabaseEnv) {
-        return getMockData();
-    }
+    if (!hasValidSupabaseEnv) return [];
 
     const { data, error } = await (await createClient()).rpc('get_nodes_with_sizes', {
         p_project_id: projectId || null,
         p_parent_id: parentId,
         p_search_query: searchQuery || null
     });
-
-    if (error) {
-        console.error('Error fetching nodes:', error);
-        throw new Error('Failed to fetch files');
-    }
-
+    if (error) throw new Error('Failed to fetch files');
     return data as DriveNode[];
 }
 
 export async function fetchRecentNodes(projectId?: string): Promise<DriveNode[]> {
-    if (!hasValidSupabaseEnv) {
-        return getMockData();
-    }
+    if (!hasValidSupabaseEnv) return [];
 
     const { data, error } = await (await createClient()).rpc('get_recent_nodes_with_sizes', {
         p_project_id: projectId || null
     });
-
-    if (error) {
-        console.error('Error fetching recent nodes:', error);
-        throw new Error('Failed to fetch recent files');
-    }
-
+    if (error) throw new Error('Failed to fetch recent files');
     return data as DriveNode[];
 }
 
@@ -125,53 +101,53 @@ export async function createFolderFolder(name: string, parentId: string | null =
     return { success: true };
 }
 
-export async function ensurePathExists(pathArray: string[], rootId: string | null = null, projectId?: string): Promise<string | null> {
-    if (!hasValidSupabaseEnv) return rootId;
+export async function ensureMultiplePathsExist(folderPaths: string[], rootId: string | null = null, projectId?: string): Promise<Record<string, string>> {
+    if (!hasValidSupabaseEnv) return {};
     const supabaseServer = await createClient();
-    if (pathArray.length === 0) return rootId;
+    
+    const sortedPaths = [...folderPaths].sort((a, b) => a.split('/').length - b.split('/').length);
+    const pathMap: Record<string, string> = { '': rootId || '' };
 
-    let currentParentId = rootId;
+    for (const path of sortedPaths) {
+        const parts = path.split('/');
+        const folderName = parts.pop()!;
+        const parentPath = parts.join('/');
+        const parentId = pathMap[parentPath] || rootId;
 
-    for (const folderName of pathArray) {
         let query = supabaseServer
             .from('share_nodes')
             .select('id')
             .eq('type', 'folder')
             .eq('name', folderName);
 
-        if (projectId) {
-            query = query.eq('project_id', projectId);
-        } else {
-            query = query.is('project_id', null);
-        }
+        if (projectId) query = query.eq('project_id', projectId);
+        else query = query.is('project_id', null);
 
-        if (currentParentId) {
-            query = query.eq('parent_id', currentParentId);
-        } else {
-            query = query.is('parent_id', null);
-        }
+        if (parentId) query = query.eq('parent_id', parentId);
+        else query = query.is('parent_id', null);
 
-        const { data: existing } = await query.single();
+        const { data: existing } = await query.maybeSingle();
 
         if (existing) {
-            currentParentId = existing.id;
+            pathMap[path] = existing.id;
         } else {
             const { data: created, error } = await supabaseServer
                 .from('share_nodes')
                 .insert([{
                     name: folderName,
                     type: 'folder',
-                    parent_id: currentParentId,
+                    parent_id: parentId || null,
                     project_id: projectId || null
                 }])
                 .select('id')
                 .single();
 
             if (error || !created) throw new Error('Failed to create folder ' + folderName);
-            currentParentId = created.id;
+            pathMap[path] = created.id;
         }
     }
-    return currentParentId;
+    
+    return pathMap;
 }
 
 export async function getUploadPresignedUrl(fileName: string, contentType: string, projectId?: string, parentId: string | null = null) {
