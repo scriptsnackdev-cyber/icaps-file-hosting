@@ -45,19 +45,7 @@ export default function FileManager() {
     const searchParams = useSearchParams();
     const router = useRouter();
     const { showToast, showConfirm } = useToast();
-    const initialLoadDone = useRef(false);
-    const lastUrlState = useRef<{ projectId: string | null, folderId: string | null, search: string | null, recent: boolean }>({
-        projectId: undefined as any, folderId: undefined as any, search: undefined as any, recent: undefined as any
-    });
-
-    const [contextMenu, setContextMenu] = useState<{ x: number, y: number, node: DriveNode } | null>(null);
-
-    const [loading, setLoading] = useState(true);
-    const [showFolderModal, setShowFolderModal] = useState(false);
-    const [newFolderName, setNewFolderName] = useState('');
-    const [renameNodeData, setRenameNodeData] = useState<DriveNode | null>(null);
-    const [editName, setEditName] = useState('');
-    const [isUploading, setIsUploading] = useState(false);
+    const { uploadFolder, isUploading: globalUploading } = useTransfer();
     const [projectRole, setProjectRole] = useState<'admin' | 'member' | 'read_only'>('read_only');
     const [projectName, setProjectName] = useState('Workspace');
 
@@ -96,41 +84,7 @@ export default function FileManager() {
     const [isSharing, setIsSharing] = useState(false);
     const [generatedLink, setGeneratedLink] = useState('');
 
-    type TransferTask = {
-        id: string;
-        name: string;
-        type: string;
-        progress: number;
-        status: 'running' | 'completed' | 'error';
-        filesDone?: number;
-        totalFiles?: number;
-        foldersDone?: number;
-        totalFolders?: number;
-    };
-    const [transfers, setTransfers] = useState<TransferTask[]>([]);
-    const [showTransfers, setShowTransfers] = useState(false);
-
-    const addTransfer = (id: string, name: string, type: string, totalFiles?: number, totalFolders?: number) => {
-        setTransfers(prev => [{
-            id, name, type, progress: 0, status: 'running',
-            filesDone: totalFiles !== undefined ? 0 : undefined,
-            totalFiles,
-            foldersDone: totalFolders !== undefined ? 0 : undefined,
-            totalFolders
-        }, ...prev]);
-        setShowTransfers(true);
-    };
-    const updateTransfer = (id: string, progress: number, filesDone?: number, foldersDone?: number) => {
-        setTransfers(prev => prev.map(t => t.id === id ? {
-            ...t,
-            progress: progress === -1 ? t.progress : progress,
-            filesDone: filesDone !== undefined ? filesDone : t.filesDone,
-            foldersDone: foldersDone !== undefined ? foldersDone : t.foldersDone
-        } : t));
-    };
-    const completeTransfer = (id: string, status: 'completed' | 'error') => {
-        setTransfers(prev => prev.map(t => t.id === id ? { ...t, progress: status === 'completed' ? 100 : t.progress, status } : t));
-    };
+    const { uploadFolder } = useTransfer();
 
     const loadData = async (parentId = currentFolder.id, searchQuery?: string, isRecent?: boolean, silent = false) => {
         if (!silent) setLoading(true);
@@ -557,11 +511,13 @@ export default function FileManager() {
     const processFolderUpload = async () => {
         if (!pendingFolderUpload) return;
         const { files, folderName } = pendingFolderUpload;
+        const projectId = searchParams?.get('projectId') || undefined;
         setPendingFolderUpload(null);
 
-        setIsUploading(true);
-        const rootTaskId = `folder-up-${Date.now()}`;
-        const projectId = searchParams?.get('projectId') || undefined;
+        await uploadFolder(files as any, folderName, currentFolder.id || '', projectId, () => {
+            loadData(currentFolder.id, undefined, false, true);
+        });
+    };
 
         // --- PHASE 1: SCAN ---
         const folderPathsSet = new Set<string>();

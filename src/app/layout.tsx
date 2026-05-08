@@ -12,6 +12,8 @@ import Sidebar from '@/components/Sidebar';
 import { ToastProvider } from '@/components/Toast';
 import SearchBar from '@/components/SearchBar';
 import { AppShell } from '@/components/AppShell';
+import { TransferProvider } from '@/context/TransferContext';
+import GlobalTransferUI from '@/components/GlobalTransferUI';
 
 const inter = Inter({ subsets: ["latin"], weight: ["300", "400", "500", "600", "700", "800"] });
 
@@ -107,18 +109,21 @@ export default async function RootLayout({
   return (
     <html lang="en">
       <body className={inter.className}>
-        <ToastProvider>
-          {!user && hasValidSupabaseEnv ? (
-            <div style={{ height: '100vh', width: '100vw' }}>{children}</div>
-          ) : (
-            <AppShell
-              sidebar={<Sidebar initialProjects={projects || []} role={role} totalUsageBytes={totalUsageBytes} />}
-              header={headerContent}
-            >
-              {children}
-            </AppShell>
-          )}
-        </ToastProvider>
+        <TransferProvider>
+          <ToastProvider>
+            {!user && hasValidSupabaseEnv ? (
+              <div style={{ height: '100vh', width: '100vw' }}>{children}</div>
+            ) : (
+              <AppShell
+                sidebar={<Sidebar initialProjects={projects || []} role={role} totalUsageBytes={totalUsageBytes} />}
+                header={headerContent}
+              >
+                {children}
+              </AppShell>
+            )}
+          </ToastProvider>
+          <GlobalTransferUI />
+        </TransferProvider>
       </body>
     </html>
   );
