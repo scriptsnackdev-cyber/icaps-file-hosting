@@ -102,8 +102,10 @@ export default function FileManager() {
         type: string;
         progress: number;
         status: 'running' | 'completed' | 'error';
-        subCount?: number;
-        totalSubCount?: number;
+        filesDone?: number;
+        totalFiles?: number;
+        foldersDone?: number;
+        totalFolders?: number;
     };
     const [transfers, setTransfers] = useState<TransferTask[]>([]);
     const [showTransfers, setShowTransfers] = useState(false);
