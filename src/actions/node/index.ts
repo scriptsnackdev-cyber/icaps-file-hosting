@@ -2,12 +2,11 @@
 
 import { DriveNode, hasValidSupabaseEnv } from '@/lib/supabase';
 import { r2Client, R2_BUCKET, hasValidR2Env } from '@/lib/r2';
-import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createClient, createServiceClient } from '@/utils/supabase/server';
 import { revalidatePath } from 'next/cache';
 import { logActivity } from '@/actions/log';
-import { DeleteObjectCommand, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 
 // MOCK DATA GENERATOR
 function getMockData() {
