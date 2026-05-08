@@ -131,35 +131,39 @@ export async function renameProject(projectId: string, newName: string) {
 }
 
 import { r2Client, R2_BUCKET, hasValidR2Env } from '@/lib/r2';
-import { DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { DeleteObjectsCommand } from '@aws-sdk/client-s3';
 
 export async function deleteProject(projectId: string) {
     if (!hasValidSupabaseEnv) return { success: true };
     const supabaseServer = await createClient();
     const serviceClient = createServiceClient();
 
-    // 1. Find all files in this project that have R2 keys
+    // 1. Find all file keys in this project
     const { data: projectFiles } = await serviceClient
         .from('share_nodes')
-        .select('name, r2_key')
+        .select('r2_key')
         .eq('project_id', projectId)
         .eq('type', 'file')
         .not('r2_key', 'is', null);
 
-    if (projectFiles && projectFiles.length > 0 && hasValidR2Env) {
-        for (const file of projectFiles) {
-            try {
-                await r2Client.send(new DeleteObjectCommand({
+    const keysToDelete = (projectFiles || []).map(f => f.r2_key).filter(Boolean) as string[];
+
+    // 2. Batch Delete from R2
+    if (keysToDelete.length > 0 && hasValidR2Env) {
+        try {
+            for (let i = 0; i < keysToDelete.length; i += 1000) {
+                const batch = keysToDelete.slice(i, i + 1000);
+                await r2Client.send(new DeleteObjectsCommand({
                     Bucket: R2_BUCKET,
-                    Key: file.r2_key!
+                    Delete: { Objects: batch.map(k => ({ Key: k })) }
                 }));
-            } catch (e) {
-                console.error(`Failed to delete ${file.name} from R2 during project cleanup`, e);
             }
+        } catch (e) {
+            console.error('Batch project delete from R2 failed', e);
         }
     }
 
-    // 2. Delete project (cascades to members and nodes)
+    // 3. Delete project (cascades)
     const { error } = await supabaseServer.from('share_projects').delete().eq('id', projectId);
     if (error) throw new Error(error.message);
     

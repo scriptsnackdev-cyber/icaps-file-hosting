@@ -265,49 +265,43 @@ export async function getPreviewUrl(r2_key: string, mimeType: string) {
     return url;
 }
 
+import { DeleteObjectCommand, DeleteObjectsCommand } from '@aws-sdk/client-s3';
+
 export async function deleteNode(id: string, r2_key: string | null = null) {
     if (!hasValidSupabaseEnv) return { success: true };
 
     const supabaseServer = await createClient();
-    const serviceClient = createServiceClient(); // Service client to bypass RLS for finding descendants
+    const serviceClient = createServiceClient();
 
-    // 1. Get info about the node to be deleted
+    // 1. Get info
     const { data: nodeInfo } = await supabaseServer.from('share_nodes').select('name, type, project_id').eq('id', id).single();
     if (!nodeInfo) return { success: true };
 
-    // 2. Handle R2 deletion
+    // 2. Collect all keys to delete
+    let keysToDelete: string[] = [];
     if (nodeInfo.type === 'folder') {
-        // Find ALL nested files that have an R2 key
-        const { data: descendants } = await serviceClient
-            .rpc('get_all_descendants', { p_node_id: id });
-        
-        const filesWithKeys = (descendants || []).filter((n: any) => n.type === 'file' && n.r2_key);
-        
-        if (filesWithKeys.length > 0 && hasValidR2Env) {
-            for (const file of filesWithKeys) {
-                try {
-                    await r2Client.send(new DeleteObjectCommand({
-                        Bucket: R2_BUCKET,
-                        Key: file.r2_key
-                    }));
-                } catch (e) {
-                    console.error(`Failed to delete ${file.name} from R2`, e);
-                }
-            }
-        }
-    } else if (r2_key && hasValidR2Env) {
-        // Single file deletion
+        const { data: descendants } = await serviceClient.rpc('get_all_descendants', { p_node_id: id });
+        keysToDelete = (descendants || []).filter((n: any) => n.type === 'file' && n.r2_key).map((n: any) => n.r2_key);
+    } else if (r2_key) {
+        keysToDelete = [r2_key];
+    }
+
+    // 3. Delete from R2 in batches of 1000
+    if (keysToDelete.length > 0 && hasValidR2Env) {
         try {
-            await r2Client.send(new DeleteObjectCommand({
-                Bucket: R2_BUCKET,
-                Key: r2_key
-            }));
+            for (let i = 0; i < keysToDelete.length; i += 1000) {
+                const batch = keysToDelete.slice(i, i + 1000);
+                await r2Client.send(new DeleteObjectsCommand({
+                    Bucket: R2_BUCKET,
+                    Delete: { Objects: batch.map(k => ({ Key: k })) }
+                }));
+            }
         } catch (e) {
-            console.error('Failed to delete from R2', e);
+            console.error('Batch delete from R2 failed', e);
         }
     }
 
-    // 3. Delete from DB (CASCADE should handle nested records)
+    // 4. DB Delete
     const { error } = await supabaseServer.from('share_nodes').delete().eq('id', id);
     if (error) throw new Error(error.message);
 

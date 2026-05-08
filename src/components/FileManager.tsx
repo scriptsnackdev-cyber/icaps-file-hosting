@@ -132,8 +132,8 @@ export default function FileManager() {
         setTransfers(prev => prev.map(t => t.id === id ? { ...t, progress: status === 'completed' ? 100 : t.progress, status } : t));
     };
 
-    const loadData = async (parentId = currentFolder.id, searchQuery?: string, isRecent?: boolean) => {
-        setLoading(true);
+    const loadData = async (parentId = currentFolder.id, searchQuery?: string, isRecent?: boolean, silent = false) => {
+        if (!silent) setLoading(true);
         const projectId = searchParams?.get('projectId') || undefined;
         try {
             if (isRecent) {
@@ -145,9 +145,8 @@ export default function FileManager() {
             }
         } catch (e) {
             console.error(e);
-            // Fallback: If network fails we can handle graceful error
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
 
@@ -244,7 +243,7 @@ export default function FileManager() {
 
         try {
             await createFolderFolder(newNode.name, currentFolder.id, projectId);
-            loadData();
+            loadData(currentFolder.id, undefined, false, true);
         } catch (err) {
             console.error(err);
             setNodes(prev => prev.filter(n => n.id !== tempId));
@@ -266,7 +265,7 @@ export default function FileManager() {
         try {
             await renameNode(targetId, editName);
             showToast(`Renamed to ${editName}`, 'success');
-            loadData();
+            loadData(currentFolder.id, undefined, false, true);
         } catch (err) {
             console.error(err);
             setNodes(prev => prev.map(n => n.id === targetId ? { ...n, name: oldName } : n));
@@ -302,7 +301,7 @@ export default function FileManager() {
             await moveNode(moveNodeData.id, targetFolderId);
             showToast('Moved successfully', 'success');
             setMoveNodeData(null);
-            loadData();
+            loadData(currentFolder.id, undefined, false, true);
         } catch (err: any) {
             showToast(err.message || 'Move failed', 'error');
         }
@@ -451,7 +450,7 @@ export default function FileManager() {
                         await processEntry(entry, targetFolderId, projectId);
                     }
                     showToast(`Uploaded ${entries.length} item(s)`, 'success');
-                    loadData();
+                    loadData(currentFolder.id, undefined, false, true);
                 } catch (err) {
                     console.error(err);
                     showToast('Upload failed', 'error');
@@ -471,7 +470,7 @@ export default function FileManager() {
             setLoading(true);
             await moveNode(nodeId, targetFolderId);
             showToast('Moved successfully', 'success');
-            loadData();
+            loadData(currentFolder.id, undefined, false, true);
         } catch (err: any) {
             showToast(err.message || 'Move failed', 'error');
             setLoading(false);
@@ -529,7 +528,7 @@ export default function FileManager() {
             // 3. Save to database
             await saveFileRecord(file.name, key, file.size, mimeType, currentFolder.id, projectId);
             completeTransfer(taskId, 'completed');
-            loadData();
+            loadData(currentFolder.id, undefined, false, true);
         } catch (err) {
             console.error(err);
             completeTransfer(taskId, 'error');
@@ -730,7 +729,7 @@ export default function FileManager() {
             try {
                 await deleteNode(node.id, node.r2_key);
                 showToast(`Deleted ${node.name}`, 'success');
-                loadData();
+                loadData(currentFolder.id, undefined, false, true);
             } catch (err) {
                 console.error(err);
                 setNodes(oldNodes);
