@@ -55,7 +55,7 @@ export default function FileManager() {
     const [showFolderModal, setShowFolderModal] = useState(false);
     const [renameNodeData, setRenameNodeData] = useState<DriveNode | null>(null);
     const [editName, setEditName] = useState('');
-    const [contextMenu, setContextMenu] = useState<{ x: number, y: number, nodeId: string } | null>(null);
+    const [contextMenu, setContextMenu] = useState<{ x: number, y: number, node: DriveNode } | null>(null);
 
     const initialLoadDone = useRef(false);
     const lastUrlState = useRef({ projectId: null as string | null, folderId: null as string | null, search: null as string | null, recent: false });
