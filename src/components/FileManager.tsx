@@ -46,9 +46,19 @@ export default function FileManager() {
     const searchParams = useSearchParams();
     const router = useRouter();
     const { showToast, showConfirm } = useToast();
-    const { uploadFolder, isUploading: globalUploading } = useTransfer();
+    const { uploadFolder, addTransfer, updateTransfer, completeTransfer, isUploading: globalUploading } = useTransfer();
+    const [isUploading, setIsUploading] = useState(false);
     const [projectRole, setProjectRole] = useState<'admin' | 'member' | 'read_only'>('read_only');
     const [projectName, setProjectName] = useState('Workspace');
+    const [loading, setLoading] = useState(false);
+    const [newFolderName, setNewFolderName] = useState('');
+    const [showFolderModal, setShowFolderModal] = useState(false);
+    const [renameNodeData, setRenameNodeData] = useState<DriveNode | null>(null);
+    const [editName, setEditName] = useState('');
+    const [contextMenu, setContextMenu] = useState<{ x: number, y: number, nodeId: string } | null>(null);
+
+    const initialLoadDone = useRef(false);
+    const lastUrlState = useRef({ projectId: null as string | null, folderId: null as string | null, search: null as string | null, recent: false });
 
     // Drag-and-drop upload state
     const [isDragOver, setIsDragOver] = useState(false);
@@ -85,7 +95,6 @@ export default function FileManager() {
     const [isSharing, setIsSharing] = useState(false);
     const [generatedLink, setGeneratedLink] = useState('');
 
-    const { uploadFolder } = useTransfer();
 
     const loadData = async (parentId = currentFolder.id, searchQuery?: string, isRecent?: boolean, silent = false) => {
         if (!silent) setLoading(true);

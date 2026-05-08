@@ -22,6 +22,9 @@ type TransferContextType = {
     setShowTransfers: (show: boolean) => void;
     isUploading: boolean;
     uploadFolder: (files: FileList, folderName: string, currentFolderId: string, projectId?: string, onComplete?: () => void) => Promise<void>;
+    addTransfer: (id: string, name: string, type: string, totalFiles?: number, totalFolders?: number) => void;
+    updateTransfer: (id: string, progress: number, filesDone?: number, foldersDone?: number) => void;
+    completeTransfer: (id: string, status: 'completed' | 'error') => void;
 };
 
 const TransferContext = createContext<TransferContextType | undefined>(undefined);
@@ -185,7 +188,10 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
     };
 
     return (
-        <TransferContext.Provider value={{ transfers, showTransfers, setShowTransfers, isUploading, uploadFolder }}>
+        <TransferContext.Provider value={{ 
+            transfers, showTransfers, setShowTransfers, isUploading, uploadFolder,
+            addTransfer, updateTransfer, completeTransfer 
+        }}>
             {children}
         </TransferContext.Provider>
     );
