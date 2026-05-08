@@ -45,7 +45,7 @@ export default async function RootLayout({
       const { data: roleData, error: roleError } = await serviceClient
         .from('share_whitelist')
         .select('role')
-        .ilike('email', user.email.trim())
+        .ilike('email', user.email.trim().toLowerCase())
         .maybeSingle();
 
       if (roleError) {

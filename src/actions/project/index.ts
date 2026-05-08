@@ -10,6 +10,18 @@ export async function fetchUserProjects(): Promise<{ id: string; name: string; u
     const { data: { user } } = await supabaseServer.auth.getUser();
     if (!user) return [];
 
+    // 1. Get global role
+    let globalRole = 'user';
+    if (user.email) {
+        const serviceClient = createServiceClient();
+        const { data: whitelistData } = await serviceClient
+            .from('share_whitelist')
+            .select('role')
+            .ilike('email', user.email.trim())
+            .maybeSingle();
+        if (whitelistData) globalRole = whitelistData.role;
+    }
+
     const [projectsRes, membersRes] = await Promise.all([
         supabaseServer.from('share_projects').select('id, name').order('name'),
         user.email
@@ -27,7 +39,7 @@ export async function fetchUserProjects(): Promise<{ id: string; name: string; u
     return (projectsRes.data || []).map(p => ({
         id: p.id,
         name: p.name,
-        userRole: (roleMap.get(p.id) as string | null) ?? null
+        userRole: globalRole === 'admin' ? 'admin' : ((roleMap.get(p.id) as string | null) ?? null)
     }));
 }
 
@@ -44,6 +56,18 @@ export async function fetchUserProjectsWithUsage(): Promise<{
     const { data: { user } } = await supabaseServer.auth.getUser();
     if (!user) return [];
 
+    // 1. Get global role
+    let globalRole = 'user';
+    if (user.email) {
+        const serviceClient = createServiceClient();
+        const { data: whitelistData } = await serviceClient
+            .from('share_whitelist')
+            .select('role')
+            .ilike('email', user.email.trim())
+            .maybeSingle();
+        if (whitelistData) globalRole = whitelistData.role;
+    }
+
     const [projectsRes, membersRes] = await Promise.all([
         supabaseServer.from('share_projects').select('id, name').order('name'),
         user.email
@@ -59,15 +83,15 @@ export async function fetchUserProjectsWithUsage(): Promise<{
     const projects = projectsRes.data || [];
     const roleMap = new Map((membersRes.data || []).map((m: { project_id: string; role: string }) => [m.project_id, m.role]));
 
-    // Only fetch usage for projects the user is a member of
-    const myProjectIds = projects
-        .filter(p => roleMap.has(p.id))
-        .map(p => p.id);
+    // Fetch usage for all projects if admin, otherwise only for members
+    const projectIdsToFetchUsage = globalRole === 'admin' 
+        ? projects.map(p => p.id)
+        : projects.filter(p => roleMap.has(p.id)).map(p => p.id);
 
     let usageMap = new Map<string, number>();
-    if (myProjectIds.length > 0) {
+    if (projectIdsToFetchUsage.length > 0) {
         const { data: usageData, error: usageError } = await supabaseServer.rpc('get_project_usages', {
-            p_project_ids: myProjectIds,
+            p_project_ids: projectIdsToFetchUsage,
         });
         if (!usageError && usageData) {
             for (const row of usageData as { project_id: string; total_bytes: number }[]) {
@@ -79,7 +103,7 @@ export async function fetchUserProjectsWithUsage(): Promise<{
     return projects.map(p => ({
         id: p.id,
         name: p.name,
-        userRole: (roleMap.get(p.id) as string | null) ?? null,
+        userRole: globalRole === 'admin' ? 'admin' : ((roleMap.get(p.id) as string | null) ?? null),
         totalBytes: usageMap.get(p.id) ?? 0,
     }));
 }

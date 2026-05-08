@@ -37,7 +37,7 @@ export default async function Home({
     const { data: roleData } = await serviceClient
       .from('share_whitelist')
       .select('role')
-      .ilike('email', user.email)
+      .ilike('email', user.email.trim().toLowerCase())
       .maybeSingle();
     if (roleData) userRole = roleData.role;
   } else if (!hasValidSupabaseEnv) {
