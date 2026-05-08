@@ -9,7 +9,7 @@ import {
     saveFileRecord,
     deleteNode,
     getDownloadUrl,
-    ensurePathExists,
+    ensureMultiplePathsExist,
     fetchRecentNodes,
     getFolderPath,
     renameNode,
