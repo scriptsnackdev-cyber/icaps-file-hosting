@@ -49,7 +49,7 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
     const updateTransfer = (id: string, progress: number, filesDone?: number, foldersDone?: number) => {
         setTransfers(prev => prev.map(t => t.id === id ? {
             ...t,
-            progress: progress === -1 ? t.progress : progress,
+            progress: progress === -2 ? Math.min(95, t.progress + 5) : (progress === -1 ? t.progress : progress),
             filesDone: filesDone !== undefined ? filesDone : t.filesDone,
             foldersDone: foldersDone !== undefined ? foldersDone : t.foldersDone
         } : t));

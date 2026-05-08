@@ -645,7 +645,7 @@ export default function FileManager() {
                     updateTransfer(taskId, Math.round((ev.loaded / ev.total) * 100));
                 } else {
                     // simulate fake progress for indeterminate
-                    setTransfers(prev => prev.map(t => t.id === taskId && t.progress < 90 ? { ...t, progress: t.progress + 5 } : t));
+                    updateTransfer(taskId, -2);
                 }
             };
             xhr.onload = () => {
