@@ -165,6 +165,28 @@ export default function FileManager() {
 
     const isGlobalRoot = !searchParams?.get('projectId') && !searchParams?.get('folderId') && !searchParams?.get('search') && !searchParams?.get('recent');
 
+    const goBack = () => {
+        if (folderHistory.length > 0) {
+            const lastFolder = folderHistory[folderHistory.length - 1];
+            const newHistory = folderHistory.slice(0, -1);
+            setFolderHistory(newHistory);
+            setCurrentFolder(lastFolder);
+            loadData(lastFolder.id, undefined, false);
+            
+            const projectId = searchParams?.get('projectId') || null;
+            const newUrl = lastFolder.id ? `/?folderId=${lastFolder.id}${projectId ? `&projectId=${projectId}` : ''}` : `/${projectId ? `?projectId=${projectId}` : ''}`;
+            window.history.pushState(null, '', newUrl);
+        } else if (currentFolder.id) {
+            // From some folder back to root
+            setCurrentFolder({ id: null, name: 'Root' });
+            setFolderHistory([]);
+            loadData(null, undefined, false);
+            const projectId = searchParams?.get('projectId') || null;
+            const newUrl = projectId ? `/?projectId=${projectId}` : '/';
+            window.history.pushState(null, '', newUrl);
+        }
+    };
+
     useEffect(() => {
         const handleClick = () => setContextMenu(null);
         window.addEventListener('click', handleClick);
@@ -697,6 +719,59 @@ export default function FileManager() {
         } catch (err) {
             console.error(err);
             completeTransfer(taskId, 'error');
+            showToast('Download failed', 'error');
+        }
+    };
+
+    const handleDownload = async (e: React.MouseEvent, node: DriveNode) => {
+        e.stopPropagation();
+        if (node.type === 'folder') {
+            showToast('Direct folder download not supported yet. Please download files individually.', 'info');
+            return;
+        }
+
+        try {
+            const url = await getDownloadUrl(node.r2_key, node.name);
+            if (url === 'https://example.com/mock-download') {
+                showToast('R2 is not configured. Returning mock download.', 'info');
+                return;
+            }
+
+            const taskId = `dl-${Date.now()}`;
+            addTransfer(taskId, `Downloading ${node.name}`, 'download');
+
+            const xhr = new XMLHttpRequest();
+            xhr.responseType = 'blob';
+            xhr.onprogress = (ev) => {
+                if (ev.lengthComputable) {
+                    updateTransfer(taskId, Math.round((ev.loaded / ev.total) * 100));
+                } else {
+                    updateTransfer(taskId, -2);
+                }
+            };
+            xhr.onload = () => {
+                if (xhr.status < 300) {
+                    const blobUrl = URL.createObjectURL(xhr.response);
+                    const a = document.createElement('a');
+                    a.href = blobUrl;
+                    a.download = node.name;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    URL.revokeObjectURL(blobUrl);
+                    completeTransfer(taskId, 'completed');
+                    
+                    const projectId = searchParams?.get('projectId') || null;
+                    logDownload(node.id, node.name, projectId);
+                } else {
+                    completeTransfer(taskId, 'error');
+                }
+            };
+            xhr.onerror = () => completeTransfer(taskId, 'error');
+            xhr.open('GET', url);
+            xhr.send();
+        } catch (err) {
+            console.error(err);
             showToast('Download failed', 'error');
         }
     };
