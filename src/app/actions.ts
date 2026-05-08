@@ -6,7 +6,7 @@ export {
     getFolderPath,
     getNodePath,
     createFolderFolder,
-    ensurePathExists,
+    ensureMultiplePathsExist,
     getUploadPresignedUrl,
     saveFileRecord,
     getDownloadUrl,
