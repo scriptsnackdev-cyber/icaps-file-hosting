@@ -74,7 +74,9 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
     }, [isUploading]);
 
     const uploadFolder = async (filesList: FileList, folderName: string, currentFolderId: string, projectId?: string, onComplete?: () => void) => {
-        const files = Array.from(filesList);
+        const allFiles = Array.from(filesList);
+        // Filter out Excel temporary/lock files (starting with ~$)
+        const files = allFiles.filter(f => !f.name.startsWith('~$'));
         if (files.length === 0) return;
 
         setIsUploading(true);

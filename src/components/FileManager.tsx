@@ -350,6 +350,7 @@ export default function FileManager() {
         projectId: string | undefined
     ): Promise<void> => {
         if (entry.isFile) {
+            if (entry.name.startsWith('~$')) return; // Skip temporary Excel lock files
             const file = await new Promise<File>((resolve, reject) =>
                 (entry as FileSystemFileEntry).file(resolve, reject)
             );
@@ -468,6 +469,13 @@ export default function FileManager() {
         const file = e.target.files?.[0];
         if (!file) return;
 
+        // Skip temporary Excel lock files
+        if (file.name.startsWith('~$')) {
+            showToast('Temporary Excel files are not supported', 'info');
+            if (fileInputRef.current) fileInputRef.current.value = '';
+            return;
+        }
+
         setIsUploading(true);
         const taskId = `up-${Date.now()}`;
         addTransfer(taskId, `Uploading ${file.name}`, 'upload');
@@ -530,7 +538,16 @@ export default function FileManager() {
         const files = e.target.files;
         if (!files || files.length === 0) return;
 
-        const fileArray = Array.from(files);
+        const allFileArray = Array.from(files);
+        // Filter out Excel temporary/lock files (starting with ~$)
+        const fileArray = allFileArray.filter(f => !f.name.startsWith('~$'));
+        
+        if (fileArray.length === 0) {
+            showToast('No valid files found in folder', 'info');
+            if (folderInputRef.current) folderInputRef.current.value = '';
+            return;
+        }
+
         // Safely extract folder name from webkitRelativePath or fallback
         const firstPath = fileArray[0].webkitRelativePath;
         const folderName = firstPath ? firstPath.split('/')[0] : 'New Folder';
