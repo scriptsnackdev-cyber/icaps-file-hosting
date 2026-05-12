@@ -81,13 +81,15 @@ export async function getNodePath(nodeId: string | null): Promise<string> {
 }
 
 export async function createFolderFolder(name: string, parentId: string | null = null, projectId?: string) {
-    if (!hasValidSupabaseEnv) return { success: true };
     const supabaseServer = await createClient();
+    const cleanParentId = (parentId && parentId.length > 10) ? parentId : null;
+    const cleanProjectId = (projectId && projectId.length > 10) ? projectId : null;
+
     const { data: inserted, error } = await supabaseServer.from('share_nodes').insert([{
         name,
         type: 'folder',
-        parent_id: parentId,
-        project_id: projectId || null
+        parent_id: cleanParentId,
+        project_id: cleanProjectId
     }]).select('id').single();
 
     if (error) throw new Error(error.message);
@@ -201,14 +203,17 @@ export async function saveFileRecord(
     if (!hasValidSupabaseEnv) return { success: true };
 
     const supabaseServer = await createClient();
+    const cleanParentId = (parentId && parentId.length > 10) ? parentId : null;
+    const cleanProjectId = (projectId && projectId.length > 10) ? projectId : null;
+
     const { data: inserted, error } = await supabaseServer.from('share_nodes').insert([{
         name,
         type: 'file',
         r2_key,
         size,
         mime_type,
-        parent_id: parentId,
-        project_id: projectId || null
+        parent_id: cleanParentId,
+        project_id: cleanProjectId
     }]).select('id').single();
 
     if (error) throw new Error(error.message);

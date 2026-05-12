@@ -144,3 +144,16 @@ BEGIN
     RETURN is_descendant(current_parent, ancestor_id);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- RPC: get_recent_nodes_with_sizes
+CREATE OR REPLACE FUNCTION get_recent_nodes_with_sizes(p_project_id UUID)
+RETURNS SETOF public.share_nodes AS $$
+BEGIN
+    RETURN QUERY
+    SELECT * FROM public.share_nodes
+    WHERE (project_id = p_project_id OR (project_id IS NULL AND p_project_id IS NULL))
+      AND type = 'file'
+    ORDER BY created_at DESC
+    LIMIT 50;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;

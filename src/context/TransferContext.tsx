@@ -126,15 +126,15 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
                 while (true) {
                     let targetIndex = -1;
                     
-                    // Find next available file
+                    // Find next available file (with a simple lock)
                     for (let i = 0; i < sortedFiles.length; i++) {
                         const f = sortedFiles[i];
                         if ((f as any)._processing || (f as any)._done) continue;
                         
                         const isLarge = f.size >= 5 * 1024 * 1024;
                         if (!isLarge || (isLarge && activeLargeUploads < LARGE_FILE_LIMIT)) {
+                            (f as any)._processing = true; // Lock it immediately
                             targetIndex = i;
-                            (f as any)._processing = true;
                             break;
                         }
                     }
@@ -169,8 +169,8 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
                             if (uploadUrl !== 'mock-url') {
                                 await new Promise<void>((resolve, reject) => {
                                     const xhr = new XMLHttpRequest();
-                                    xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error('Fail')));
-                                    xhr.onerror = () => reject(new Error('Net error'));
+                                    xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`HTTP ${xhr.status}`)));
+                                    xhr.onerror = () => reject(new Error('Network error'));
                                     xhr.open('PUT', uploadUrl);
                                     xhr.setRequestHeader('Content-Type', mimeType);
                                     xhr.send(file);
@@ -179,10 +179,13 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
                             await saveFileRecord(fileName, key, file.size, mimeType, targetParentId || null, projectId);
                         } else {
                             const errData = await signRes.json().catch(() => ({}));
-                            console.error(`Sign failed for ${fileName}:`, errData);
+                            throw new Error(errData.error || `Sign failed: ${signRes.status}`);
                         }
-                    } catch (e) {
+                    } catch (e: any) {
                         console.error(`Failed to upload ${fileName}`, e);
+                        completeTransfer(rootTaskId, 'error');
+                        updateTransfer(rootTaskId, -1, undefined, undefined, `Error: ${e.message || 'Upload failed'}`);
+                        // We continue with other files but the root task is already marked as error
                     } finally {
                         if (isLarge) activeLargeUploads--;
                         (file as any)._done = true;
