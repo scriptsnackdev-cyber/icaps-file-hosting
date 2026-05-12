@@ -57,6 +57,7 @@ export default function FileManager() {
 
     const initialLoadDone = useRef(false);
     const lastUrlState = useRef({ projectId: null as string | null, folderId: null as string | null, search: null as string | null, recent: false });
+    const folderPathCache = useRef<Record<string, { history: any[], currentFolder: any }>>({});
 
     // Drag-and-drop upload state
     const [isDragOver, setIsDragOver] = useState(false);
@@ -95,7 +96,12 @@ export default function FileManager() {
 
 
     const loadData = async (parentId = currentFolder.id, searchQuery?: string, isRecent?: boolean, silent = false) => {
-        if (!silent) setLoading(true);
+        if (!silent) {
+            setLoading(true);
+            // If we are navigating to a new parent, clear nodes to avoid showing stale data
+            if (parentId !== currentFolder.id) setNodes([]);
+        }
+        
         const projectId = searchParams?.get('projectId') || undefined;
         try {
             if (isRecent) {
@@ -108,7 +114,7 @@ export default function FileManager() {
         } catch (e) {
             console.error(e);
         } finally {
-            if (!silent) setLoading(false);
+            setLoading(false);
         }
     };
 
@@ -143,12 +149,20 @@ export default function FileManager() {
                 setFolderHistory([]);
                 setCurrentFolder({ id: null, name: 'Root' });
             } else if (folderId && (!initialLoadDone.current || folderId !== currentFolder.id)) {
-                try {
-                    const { history, currentFolder: cf } = await getFolderPath(folderId);
+                // Use cache if available
+                if (folderPathCache.current[folderId]) {
+                    const { history, currentFolder: cf } = folderPathCache.current[folderId];
                     setFolderHistory(history);
                     setCurrentFolder(cf);
-                } catch (e) {
-                    console.error('Failed to load folder path', e);
+                } else {
+                    try {
+                        const { history, currentFolder: cf } = await getFolderPath(folderId);
+                        folderPathCache.current[folderId] = { history, currentFolder: cf };
+                        setFolderHistory(history);
+                        setCurrentFolder(cf);
+                    } catch (e) {
+                        console.error('Failed to load folder path', e);
+                    }
                 }
             } else if (!folderId && (!initialLoadDone.current || currentFolder.id !== null)) {
                 setFolderHistory([]);
@@ -651,8 +665,15 @@ export default function FileManager() {
     const navigateToFolder = (node: DriveNode) => {
         if (node.type !== 'folder') return;
         const projectId = searchParams?.get('projectId') || null;
-        setFolderHistory(prev => [...prev, currentFolder]);
-        setCurrentFolder({ id: node.id, name: node.name });
+        
+        // Optimistic update
+        const newHistory = [...folderHistory, currentFolder];
+        const newCurrent = { id: node.id, name: node.name };
+        setFolderHistory(newHistory);
+        setCurrentFolder(newCurrent);
+        
+        // Pre-cache the current path to make back navigation instant
+        folderPathCache.current[node.id] = { history: newHistory, currentFolder: newCurrent };
 
         loadData(node.id, undefined, false);
         lastUrlState.current = { projectId, folderId: node.id, search: null, recent: false };
@@ -969,6 +990,18 @@ export default function FileManager() {
                         </div>
                     </div>
                 )}
+                <div className={styles.listHeader}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <div onClick={toggleSelectAll} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', color: selectedIds.size > 0 && selectedIds.size === nodes.length ? 'var(--brand-end)' : 'var(--text-muted)' }}>
+                            {selectedIds.size > 0 && selectedIds.size === nodes.length ? <CheckSquare size={16} /> : <Square size={16} />}
+                        </div>
+                        Name
+                    </div>
+                    <div>Modified</div>
+                    <div>Size</div>
+                    <div />
+                </div>
+
                 {loading ? (
                     <div className={styles.loadingState}>
                         {[...Array(8)].map((_, i) => (
@@ -977,18 +1010,6 @@ export default function FileManager() {
                     </div>
                 ) : (
                     <>
-                        <div className={styles.listHeader}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                                <div onClick={toggleSelectAll} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', color: selectedIds.size > 0 && selectedIds.size === nodes.length ? 'var(--brand-end)' : 'var(--text-muted)' }}>
-                                    {selectedIds.size > 0 && selectedIds.size === nodes.length ? <CheckSquare size={16} /> : <Square size={16} />}
-                                </div>
-                                Name
-                            </div>
-                            <div>Modified</div>
-                            <div>Size</div>
-                            <div />
-                        </div>
-
                         {nodes.length === 0 ? (
                             <div className={styles.emptyState}>
                                 <Folder size={44} color="var(--text-muted)" />
