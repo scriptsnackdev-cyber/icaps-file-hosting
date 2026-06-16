@@ -20,6 +20,30 @@ export async function fetchNodes(parentId: string | null = null, searchQuery?: s
     return data as DriveNode[];
 }
 
+export async function fetchAllNodes(projectId?: string): Promise<DriveNode[]> {
+    if (!hasValidSupabaseEnv) return [];
+    
+    // We fetch everything for this project to handle navigation client-side
+    const { data, error } = await (await createClient()).rpc('get_nodes_with_sizes', {
+        p_project_id: projectId || null,
+        p_parent_id: null,
+        p_search_query: null,
+        p_fetch_all: true // We'll need to update the RPC or handle it here
+    });
+    
+    // Wait, the RPC might not support p_fetch_all. Let's just use a direct query with the same logic as the RPC
+    const client = await createClient();
+    let query = client.from('share_nodes').select('*');
+    
+    if (projectId) query = query.eq('project_id', projectId);
+    else query = query.is('project_id', null);
+    
+    const { data: nodes, error: err } = await query.order('type', { ascending: false }).order('name', { ascending: true });
+    
+    if (err) throw new Error('Failed to fetch all files');
+    return nodes as DriveNode[];
+}
+
 export async function fetchRecentNodes(projectId?: string): Promise<DriveNode[]> {
     if (!hasValidSupabaseEnv) return [];
 
@@ -61,9 +85,9 @@ export async function getNodePath(nodeId: string | null): Promise<string> {
 
     const pathParts: string[] = [];
     let currentId: string | null = nodeId;
+    const client = await createClient();
 
     while (currentId) {
-        const client = await createClient();
         const response = await client
             .from('share_nodes')
             .select('id, name, parent_id')
@@ -100,7 +124,7 @@ export async function createFolderFolder(name: string, parentId: string | null =
     }
 
     revalidatePath('/');
-    return { success: true };
+    return { success: true, id: inserted?.id };
 }
 
 export async function ensureMultiplePathsExist(folderPaths: string[], rootId: string | null = null, projectId?: string): Promise<Record<string, string>> {
@@ -112,9 +136,23 @@ export async function ensureMultiplePathsExist(folderPaths: string[], rootId: st
     const pathMap: Record<string, string> = { '': rootId || '' };
 
     // Optimization: Fetch all folders in this project/parent once to minimize queries
-    // We can't easily fetch everything at once if it's deeply nested and we don't know the full tree,
-    // but we can at least fetch the first level or use a recursive query if needed.
-    // For now, let's just make it more robust.
+    let query = supabaseServer.from('share_nodes').select('id, name, parent_id').eq('type', 'folder');
+    if (projectId) {
+        query = query.eq('project_id', projectId);
+    } else {
+        query = query.is('project_id', null);
+    }
+    const { data: existingFolders } = await query;
+
+    // Build folder cache: parentId (or 'root') -> Map of folderName -> folderId
+    const folderCache = new Map<string, Map<string, string>>();
+    (existingFolders || []).forEach(f => {
+        const parentKey = f.parent_id || 'root';
+        if (!folderCache.has(parentKey)) {
+            folderCache.set(parentKey, new Map());
+        }
+        folderCache.get(parentKey)!.set(f.name, f.id);
+    });
 
     for (const path of sortedPaths) {
         const parts = path.split('/');
@@ -124,23 +162,12 @@ export async function ensureMultiplePathsExist(folderPaths: string[], rootId: st
 
         // Ensure parentId is a valid UUID or null
         const cleanParentId = (parentId && parentId.length > 10) ? parentId : null;
+        const parentKey = cleanParentId || 'root';
 
-        let query = supabaseServer
-            .from('share_nodes')
-            .select('id')
-            .eq('type', 'folder')
-            .eq('name', folderName);
+        const existingId = folderCache.get(parentKey)?.get(folderName);
 
-        if (projectId) query = query.eq('project_id', projectId);
-        else query = query.is('project_id', null);
-
-        if (cleanParentId) query = query.eq('parent_id', cleanParentId);
-        else query = query.is('parent_id', null);
-
-        const { data: existing, error: queryError } = await query.maybeSingle();
-
-        if (existing) {
-            pathMap[path] = existing.id;
+        if (existingId) {
+            pathMap[path] = existingId;
         } else {
             const { data: created, error } = await supabaseServer
                 .from('share_nodes')
@@ -157,6 +184,12 @@ export async function ensureMultiplePathsExist(folderPaths: string[], rootId: st
                 console.error('Folder creation error:', error);
                 throw new Error('Failed to create folder ' + folderName);
             }
+            
+            // Add new folder to cache
+            if (!folderCache.has(parentKey)) {
+                folderCache.set(parentKey, new Map());
+            }
+            folderCache.get(parentKey)!.set(folderName, created.id);
             pathMap[path] = created.id;
         }
     }

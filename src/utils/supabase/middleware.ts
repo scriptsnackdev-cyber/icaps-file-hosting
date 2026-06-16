@@ -15,9 +15,16 @@ export async function updateSession(request: NextRequest) {
         return supabaseResponse
     }
 
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith('http')
+        ? process.env.NEXT_PUBLIC_SUPABASE_URL
+        : 'https://mock-example.supabase.co';
+    const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY && !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY.startsWith('YOUR_')
+        ? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+        : 'mock-anon-key';
+
     const supabase = createServerClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        url,
+        key,
         {
             cookies: {
                 getAll() {

@@ -111,6 +111,7 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
 
             // --- PHASE 3: FILLING (FILES) ---
             let filesDone = 0;
+            let hasError = false;
             const sortedFiles = [...files].sort((a, b) => {
                 const pathA = (a as any).webkitRelativePath || a.name;
                 const pathB = (b as any).webkitRelativePath || b.name;
@@ -185,6 +186,7 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
                         }
                     } catch (e: any) {
                         console.error(`Failed to upload ${fileName}`, e);
+                        hasError = true;
                         completeTransfer(rootTaskId, 'error');
                         updateTransfer(rootTaskId, -1, undefined, undefined, `Error: ${e.message || 'Upload failed'}`);
                         // We continue with other files but the root task is already marked as error
@@ -205,7 +207,7 @@ export function TransferProvider({ children }: { children: React.ReactNode }) {
             }
             await Promise.all(workers);
 
-            completeTransfer(rootTaskId, 'completed');
+            completeTransfer(rootTaskId, hasError ? 'error' : 'completed');
             if (onComplete) onComplete();
         } catch (err) {
             console.error(err);

@@ -1,12 +1,17 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://mock-example.supabase.co';
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'mock-anon-key';
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith('http')
+    ? process.env.NEXT_PUBLIC_SUPABASE_URL
+    : 'https://mock-example.supabase.co';
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY && !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY.startsWith('YOUR_')
+    ? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+    : 'mock-anon-key';
 
 // Keep the check boolean if we are using real keys
 export const hasValidSupabaseEnv =
     process.env.NEXT_PUBLIC_SUPABASE_URL &&
-    process.env.NEXT_PUBLIC_SUPABASE_URL !== 'YOUR_SUPABASE_URL';
+    process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith('http') &&
+    !process.env.NEXT_PUBLIC_SUPABASE_URL.includes('YOUR_SUPABASE_PROJECT_URL');
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 

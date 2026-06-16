@@ -229,9 +229,9 @@ export default function Sidebar({
         <aside style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
             {/* ── Logo ── */}
             <div className={styles.logoArea}>
-                <div style={{ position: 'relative', width: '100%', height: '150px' }}>
+                <Link href="/" style={{ display: 'block', width: '100%', height: '150px', position: 'relative' }}>
                     <Image src="/ICAPS.png" alt="ICAPS Clouds Logo" fill sizes="200px" style={{ objectFit: 'contain', objectPosition: 'left' }} priority />
-                </div>
+                </Link>
             </div>
 
             {/* ── Nav ── */}

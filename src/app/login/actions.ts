@@ -1,14 +1,15 @@
 'use server'
 
-import { createClient } from '@/utils/supabase/server'
+import { createClient, createServiceClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 
 export async function sendOTP(formData: FormData) {
     const email = formData.get('email') as string
     const supabase = await createClient()
+    const serviceClient = createServiceClient()
 
     // 1. Check if email is in whitelist
-    const { data: whitelistData, error: whitelistError } = await supabase
+    const { data: whitelistData, error: whitelistError } = await serviceClient
         .from('share_whitelist')
         .select('email, role')
         .eq('email', email)
