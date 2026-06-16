@@ -6,45 +6,45 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
 :root {
-  /* Brand */
-  --brand-start: #4f46e5;
-  --brand-mid: #7c3aed;
-  --brand-end: #9333ea;
-  --brand-glow: rgba(79, 70, 229, 0.15);
+  /* Brand - Cool Sky/Ice Blue */
+  --brand-start: #0ea5e9;
+  --brand-mid: #0284c7;
+  --brand-end: #38bdf8;
+  --brand-glow: rgba(14, 165, 233, 0.25);
 
-  /* Backgrounds */
-  --bg-base: #f1f5f9;
-  --bg-elevated: #ffffff;
-  --bg-surface: #ffffff;
-  --bg-overlay: #f8fafc;
-  --bg-hover: #e2e8f0;
+  /* Backgrounds - Sleek Slate / Gray-Blue */
+  --bg-base: #0f172a;
+  --bg-elevated: #1e293b;
+  --bg-surface: #1e293b;
+  --bg-overlay: #334155;
+  --bg-hover: #475569;
 
   /* Borders */
-  --border-soft: rgba(0, 0, 0, 0.05);
-  --border-mid: rgba(0, 0, 0, 0.09);
-  --border-focus: rgba(79, 70, 229, 0.4);
+  --border-soft: rgba(255, 255, 255, 0.05);
+  --border-mid: rgba(255, 255, 255, 0.10);
+  --border-focus: rgba(14, 165, 233, 0.5);
 
-  /* Text */
-  --text-primary: #0f172a;
-  --text-secondary: #475569;
+  /* Text - High contrast cool grays */
+  --text-primary: #f8fafc;
+  --text-secondary: #cbd5e1;
   --text-muted: #64748b;
 
   /* Semantic colors */
-  --success-bg: rgba(16, 185, 129, 0.08);
-  --success-text: #059669;
-  --success-border: rgba(16, 185, 129, 0.2);
+  --success-bg: rgba(16, 185, 129, 0.12);
+  --success-text: #34d399;
+  --success-border: rgba(52, 211, 153, 0.3);
 
-  --error-bg: rgba(239, 68, 68, 0.08);
-  --error-text: #dc2626;
-  --error-border: rgba(239, 68, 68, 0.2);
+  --error-bg: rgba(239, 68, 68, 0.12);
+  --error-text: #f87171;
+  --error-border: rgba(248, 113, 113, 0.3);
 
-  --info-bg: rgba(59, 130, 246, 0.08);
-  --info-text: #2563eb;
-  --info-border: rgba(59, 130, 246, 0.2);
+  --info-bg: rgba(59, 130, 246, 0.12);
+  --info-text: #60a5fa;
+  --info-border: rgba(96, 165, 250, 0.3);
 
-  --warning-bg: rgba(245, 158, 11, 0.08);
-  --warning-text: #d97706;
-  --warning-border: rgba(245, 158, 11, 0.2);
+  --warning-bg: rgba(245, 158, 11, 0.12);
+  --warning-text: #fbbf24;
+  --warning-border: rgba(251, 191, 36, 0.3);
 
   /* Radius */
   --r-xs: 4px;
@@ -55,10 +55,10 @@
   --r-full: 9999px;
 
   /* Shadows */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
-  --shadow-lg: 0 12px 30px rgba(0, 0, 0, 0.12);
-  --shadow-glow: 0 0 24px rgba(79, 70, 229, 0.1);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --shadow-glow: 0 0 24px rgba(14, 165, 233, 0.15);
 
   /* Transitions */
   --ease-fast: 0.15s cubic-bezier(0.4, 0, 0.2, 1);
@@ -69,7 +69,7 @@
   --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 
   /* Header background */
-  --header-bg: rgba(255, 255, 255, 0.85);
+  --header-bg: rgba(30, 41, 59, 0.85);
 
   /* Legacy aliases – keep old vars working */
   --primary-color: var(--brand-start);
@@ -82,7 +82,7 @@
   --border-color: var(--border-mid);
   --radius-md: var(--r-md);
   --radius-lg: var(--r-lg);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
 /* ── Reset ── */
@@ -142,7 +142,7 @@ select {
 
 /* ── Utility: Glass ── */
 .glass {
-  background: rgba(255, 255, 255, 0.75);
+  background: rgba(30, 41, 59, 0.75);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   border-bottom: 1px solid var(--border-soft);

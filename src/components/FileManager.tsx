@@ -155,6 +155,7 @@ export default function FileManager() {
             lastUrlState.current = { projectId, folderId, search: searchQ, recent: isRecent };
 
             if (isProjectChanged || !initialLoadDone.current) {
+                setAllNodes([]);
                 if (projectId) {
                     fetchProject(projectId).then(proj => { if (proj) setProjectName(proj.name); });
                     getMyRoleInProject(projectId).then(role => setProjectRole(role as 'admin' | 'member' | 'read_only'));
