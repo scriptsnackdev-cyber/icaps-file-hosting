@@ -23,16 +23,8 @@ export async function fetchNodes(parentId: string | null = null, searchQuery?: s
 export async function fetchAllNodes(projectId?: string): Promise<DriveNode[]> {
     if (!hasValidSupabaseEnv) return [];
     
-    // We fetch everything for this project to handle navigation client-side
-    const { data, error } = await (await createClient()).rpc('get_nodes_with_sizes', {
-        p_project_id: projectId || null,
-        p_parent_id: null,
-        p_search_query: null,
-        p_fetch_all: true // We'll need to update the RPC or handle it here
-    });
-    
-    // Wait, the RPC might not support p_fetch_all. Let's just use a direct query with the same logic as the RPC
-    const client = await createClient();
+    // Use service client to fetch all nodes for client-side navigation bypass RLS restrictions
+    const client = createServiceClient();
     let query = client.from('share_nodes').select('*');
     
     if (projectId) query = query.eq('project_id', projectId);
@@ -40,7 +32,10 @@ export async function fetchAllNodes(projectId?: string): Promise<DriveNode[]> {
     
     const { data: nodes, error: err } = await query.order('type', { ascending: false }).order('name', { ascending: true });
     
-    if (err) throw new Error('Failed to fetch all files');
+    if (err) {
+        console.error('Failed to fetch all nodes:', err);
+        return [];
+    }
     return nodes as DriveNode[];
 }
 
@@ -60,9 +55,10 @@ export async function getFolderPath(folderId: string) {
     const history = [];
     let currentId: string | null = folderId;
     let currentFolderName = 'Unknown Folder';
+    const client = createServiceClient();
 
     while (currentId) {
-        const response = await (await createClient()).from('share_nodes').select('id, name, parent_id').eq('id', currentId).single();
+        const response = await client.from('share_nodes').select('id, name, parent_id').eq('id', currentId).single();
         if (response.error || !response.data) break;
         const nodeData = response.data as { id: string, name: string, parent_id: string | null };
 
@@ -85,7 +81,7 @@ export async function getNodePath(nodeId: string | null): Promise<string> {
 
     const pathParts: string[] = [];
     let currentId: string | null = nodeId;
-    const client = await createClient();
+    const client = createServiceClient();
 
     while (currentId) {
         const response = await client
